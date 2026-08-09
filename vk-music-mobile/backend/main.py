@@ -18,21 +18,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+# Render coloca los Secret Files en /etc/secrets/
+RENDER_SECRET_COOKIE = "/etc/secrets/cookies.txt"
+LOCAL_COOKIE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-def setup_cookies():
-    """Lee la variable YOUTUBE_COOKIES y genera cookies.txt automáticamente"""
-    cookies_content = os.getenv("YOUTUBE_COOKIES")
-    if cookies_content:
-        try:
-            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
-                f.write(cookies_content)
-            print("[COOKIES]: Archivo cookies.txt generado exitosamente.")
-        except Exception as e:
-            print(f"[COOKIES ERROR]: {e}")
+def get_cookie_path():
+    if os.path.exists(RENDER_SECRET_COOKIE):
+        return RENDER_SECRET_COOKIE
+    elif os.path.exists(LOCAL_COOKIE):
+        return LOCAL_COOKIE
+    return None
 
-# Se ejecuta al cargar el script
-setup_cookies()
+COOKIE_FILE = get_cookie_path()
 
 def get_ytdlp_opts(extra_opts: dict = None) -> dict:
     opts = {
@@ -43,7 +40,7 @@ def get_ytdlp_opts(extra_opts: dict = None) -> dict:
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     }
 
-    if os.path.exists(COOKIE_FILE):
+    if COOKIE_FILE:
         opts['cookiefile'] = COOKIE_FILE
 
     if extra_opts:
@@ -59,7 +56,11 @@ HEADERS = {
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "API activa"}
+    return {
+        "status": "ok",
+        "cookie_detected": COOKIE_FILE is not None,
+        "cookie_path": COOKIE_FILE
+    }
 
 def extract_youtube_id(text: str) -> str | None:
     if not text:
