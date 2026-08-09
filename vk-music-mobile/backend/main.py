@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 
-app = FastAPI(title="VK Music API")
+app = FastAPI(title="VK Music API", redirect_slashes=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,6 +12,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configuración base de yt-dlp para simular un cliente móvil nativo
+YDL_COMMON_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['ios', 'android', 'mweb']
+        }
+    }
+}
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API activa"}
@@ -19,31 +30,35 @@ def health_check():
 @app.get("/search")
 def search(q: str = Query(..., description="Término de búsqueda")):
     ydl_opts = {
-        'extract_flat': True,
+        **YDL_COMMON_OPTS,
+        'extract_flat': 'in_playlist',
         'skip_download': True,
-        'quiet': True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(f"ytsearch5:{q}", download=False)
             results = []
-            for entry in info.get('entries', []):
+            entries = info.get('entries', []) if info else []
+            for entry in entries:
+                if not entry:
+                    continue
                 results.append({
                     "id": entry.get("id"),
                     "title": entry.get("title"),
-                    "uploader": entry.get("uploader"),
+                    "uploader": entry.get("uploader") or entry.get("channel") or "Desconocido",
                     "duration": entry.get("duration"),
                     "webpage_url": entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
                 })
             return results
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Error en /search: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error en la búsqueda: {str(e)}")
 
 @app.get("/get-audio")
 def get_audio(url: str = Query(..., description="URL del video")):
     ydl_opts = {
+        **YDL_COMMON_OPTS,
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'quiet': True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -55,4 +70,5 @@ def get_audio(url: str = Query(..., description="URL del video")):
                 "audio_url": info.get("url")
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Error en /get-audio: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error al obtener audio: {str(e)}")
