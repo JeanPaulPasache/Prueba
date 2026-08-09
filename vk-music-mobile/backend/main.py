@@ -22,6 +22,10 @@ RENDER_SECRET_COOKIE = "/etc/secrets/cookies.txt"
 LOCAL_COOKIE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 CLEAN_COOKIE_FILE = "/tmp/cookies_sanitized.txt"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+}
+
 def sanitize_and_get_cookie_path() -> str | None:
     """Busca el archivo de cookies y arregla los tabuladores en /tmp si Render los convirtió en espacios."""
     raw_path = None
@@ -386,7 +390,7 @@ async def get_audio(url: str = Query(..., description="URL o término de búsque
 
         # 2. Respaldo por yt-dlp con clientes móviles (Android/iOS)
         try:
-            data = await asyncio.to_thread(sync_extract_ytdlp, target_youtube_url)
+            data = await asyncio.to_thread(sync_extract_audio_ytdlp, target_youtube_url)
             if data and data.get("audio_url"):
                 return data
         except Exception as e:
