@@ -119,7 +119,7 @@ def debug_cookies():
         "contains_tabs": any("\t" in line for line in lines)
     }
 
-app.get("/test-download")
+@app.get("/test-download")
 def test_download(v: str = "dQw4w9WgXcQ"):
     try:
         opts = get_ytdlp_opts({'format': 'ba/b'})
