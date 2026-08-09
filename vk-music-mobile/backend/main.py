@@ -18,9 +18,69 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Render coloca los Secret Files en /etc/secrets/
 RENDER_SECRET_COOKIE = "/etc/secrets/cookies.txt"
 LOCAL_COOKIE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+def resolve_cookie_path():
+    if os.path.exists(RENDER_SECRET_COOKIE):
+        print(f"[COOKIES LOG]: Encontrado archivo en Render Secret File: {RENDER_SECRET_COOKIE}")
+        return RENDER_SECRET_COOKIE
+    elif os.path.exists(LOCAL_COOKIE):
+        print(f"[COOKIES LOG]: Encontrado archivo local: {LOCAL_COOKIE}")
+        return LOCAL_COOKIE
+    print("[COOKIES LOG]: No se encontró ningún archivo cookies.txt")
+    return None
+
+COOKIE_PATH = resolve_cookie_path()
+
+@app.get("/debug-cookies")
+def debug_cookies():
+    """Endpoint para verificar el estado de las cookies en el servidor"""
+    if not COOKIE_PATH:
+        return {"status": "error", "message": "No se encontró el archivo cookies.txt"}
+    
+    try:
+        with open(COOKIE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        has_sid = any("SID" in line for line in lines)
+        has_login_info = any("LOGIN_INFO" in line for line in lines)
+        
+        return {
+            "status": "ok",
+            "path": COOKIE_PATH,
+            "total_lines": len(lines),
+            "contains_SID": has_sid,
+            "contains_LOGIN_INFO": has_login_info,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def sync_extract_test(url: str):
+    opts = {
+        'quiet': False,  # Muestra el log detallado de yt-dlp en Render
+        'no_warnings': False,
+        'skip_download': True,
+        'nocheckcertificate': True,
+        'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
+        # Forzar clientes web/mweb para intentar mitigar la detección
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web', 'mweb', 'ios']
+            }
+        }
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+@app.get("/test-download")
+def test_download(v: str = "dQw4w9WgXcQ"):
+    """Prueba de extracción directa con logs hacia la consola"""
+    try:
+        info = sync_extract_test(f"https://www.youtube.com/watch?v={v}")
+        return {"status": "success", "title": info.get("title")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en yt-dlp: {str(e)}")
 
 def get_cookie_path():
     if os.path.exists(RENDER_SECRET_COOKIE):
