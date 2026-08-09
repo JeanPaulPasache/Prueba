@@ -137,8 +137,8 @@ def test_download(v: str = "dQw4w9WgXcQ"):
 def health_check():
     return {
         "status": "ok",
-        "cookie_detected": COOKIE_FILE is not None,
-        "cookie_path": COOKIE_FILE
+        "cookie_detected": COOKIE_PATH is not None,
+        "cookie_path": COOKIE_PATH
     }
 
 def extract_youtube_id(text: str) -> str | None:
