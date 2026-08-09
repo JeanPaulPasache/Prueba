@@ -1,3 +1,7 @@
+from fastapi import FastAPI
+
+app = FastAPI()
+
 def sync_extract_ytdlp(target_youtube_url: str):
     """Extracción con yt-dlp usando clientes móviles para evadir bloqueos de IP/Cookies"""
     ydl_opts = {
