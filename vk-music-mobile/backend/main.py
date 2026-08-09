@@ -84,7 +84,7 @@ def sanitize_and_get_cookie_path() -> str | None:
 # Obtener la ruta limpia
 COOKIE_PATH = sanitize_and_get_cookie_path()
 
-def get_ytdlp_opts(extra_opts: dict = None) -> dict:
+def get_ytdlp_opts(extra_opts: dict = None, use_cookies: bool = True) -> dict:
     opts = {
         'quiet': True,
         'no_warnings': True,
@@ -93,13 +93,13 @@ def get_ytdlp_opts(extra_opts: dict = None) -> dict:
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
-                # Clientes en orden de prioridad para evitar bloqueos y fallos de formato
-                'player_client': ['ios', 'android', 'mweb', 'web']
+                # tv_embedded y mweb son los clientes más resistentes en Render sin disparar bot detection
+                'player_client': ['tv_embedded', 'mweb', 'android', 'ios']
             }
         }
     }
 
-    if COOKIE_PATH and os.path.exists(COOKIE_PATH):
+    if use_cookies and COOKIE_PATH and os.path.exists(COOKIE_PATH):
         opts['cookiefile'] = COOKIE_PATH
 
     if extra_opts:
@@ -321,33 +321,64 @@ async def resolve_video_id(query_or_url: str) -> str | None:
     return None
 
 def sync_extract_audio_ytdlp(target_url: str):
-    """Extracción directa del enlace de audio con yt-dlp"""
-    # 'ba/b' busca el mejor audio (bestaudio), y si no lo halla, toma el mejor formato disponible
-    opts = get_ytdlp_opts({'format': 'ba/b'})
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(target_url, download=False)
-        
-        audio_url = info.get("url")
-        
-        # Si la URL directa no viene en la raíz del diccionario, buscamos en la lista de formats
-        if not audio_url and info.get("formats"):
-            # Priorizar formatos que solo contengan audio
-            audio_formats = [f for f in info["formats"] if f.get("vcodec") == "none" and f.get("url")]
-            if audio_formats:
-                audio_url = audio_formats[-1]["url"]
-            else:
-                # Si no hay formato de solo audio, tomar el último formato disponible con URL
-                valid_formats = [f for f in info["formats"] if f.get("url")]
-                if valid_formats:
-                    audio_url = valid_formats[-1]["url"]
+    """Extracción de audio con fallback automático de cookies"""
+    # Intento 1: Con cookies. Intento 2: Sin cookies (usando tv_embedded)
+    for use_cookies in [True, False]:
+        try:
+            opts = get_ytdlp_opts({'format': 'ba/b'}, use_cookies=use_cookies)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(target_url, download=False)
+                
+                audio_url = info.get("url")
+                
+                if not audio_url and info.get("formats"):
+                    audio_formats = [f for f in info["formats"] if f.get("vcodec") == "none" and f.get("url")]
+                    if audio_formats:
+                        audio_url = audio_formats[-1]["url"]
+                    else:
+                        valid_formats = [f for f in info["formats"] if f.get("url")]
+                        if valid_formats:
+                            audio_url = valid_formats[-1]["url"]
 
-        if audio_url:
-            return {
-                "title": info.get("title", "Audio Stream"),
-                "uploader": info.get("uploader") or info.get("artist") or "Desconocido",
-                "duration": info.get("duration", 0),
-                "audio_url": audio_url
-            }
+                if audio_url:
+                    print(f"[YT-DLP SUCCESS]: Extraído correctamente (use_cookies={use_cookies})")
+                    return {
+                        "title": info.get("title", "Audio Stream"),
+                        "uploader": info.get("uploader") or info.get("artist") or "Desconocido",
+                        "duration": info.get("duration", 0),
+                        "audio_url": audio_url
+                    }
+        except Exception as e:
+            print(f"[YT-DLP FAIL (use_cookies={use_cookies})]: {e}")
+            continue
+            
+    return None
+
+async def fetch_piped_stream(video_id: str):
+    """Obtiene el enlace directo de audio desde instancias públicas de Piped"""
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://api.piped.private.coffee",
+        "https://pipedapi.mha.fi"
+    ]
+    async with httpx.AsyncClient(timeout=5.0, headers=HEADERS, follow_redirects=True, verify=False) as client:
+        for instance in piped_instances:
+            try:
+                res = await client.get(f"{instance}/streams/{video_id}")
+                if res.status_code == 200:
+                    data = res.json()
+                    audio_streams = data.get("audioStreams", [])
+                    if audio_streams:
+                        # Seleccionar la mejor calidad de audio disponible
+                        best_audio = audio_streams[0]
+                        return {
+                            "title": data.get("title", "Audio Stream"),
+                            "uploader": data.get("uploader", "Desconocido"),
+                            "duration": data.get("duration", 0),
+                            "audio_url": best_audio.get("url")
+                        }
+            except Exception:
+                continue
     return None
 
 @app.get("/get-audio")
@@ -359,8 +390,13 @@ async def get_audio(url: str = Query(..., description="URL o término de búsque
 
     target_youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True, verify=False) as client:
-        # 1. API oficial de Cobalt v10
+    # 1. Respaldo por Piped API (Rápido y salta bloqueos de datacenter)
+    piped_data = await fetch_piped_stream(video_id)
+    if piped_data and piped_data.get("audio_url"):
+        return piped_data
+
+    # 2. API oficial de Cobalt v10
+    async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True, verify=False) as client:
         try:
             cobalt_headers = {
                 "Accept": "application/json",
@@ -388,16 +424,17 @@ async def get_audio(url: str = Query(..., description="URL o término de búsque
         except Exception as e:
             print(f"[COBALT ERROR]: {e}")
 
-        # 2. Respaldo por yt-dlp con clientes móviles (Android/iOS)
-        try:
-            data = await asyncio.to_thread(sync_extract_audio_ytdlp, target_youtube_url)
-            if data and data.get("audio_url"):
-                return data
-        except Exception as e:
-            print(f"[YT-DLP ERROR]: {e}")
+    # 3. Respaldo por yt-dlp (con reintento de cliente tv_embedded y fallback sin cookies)
+    try:
+        data = await asyncio.to_thread(sync_extract_audio_ytdlp, target_youtube_url)
+        if data and data.get("audio_url"):
+            return data
+    except Exception as e:
+        print(f"[YT-DLP ERROR]: {e}")
 
-        # 3. Respaldo por instancias Invidious dinámicas saludables
-        instances = await fetch_dynamic_invidious_instances()
+    # 4. Respaldo por instancias Invidious dinámicas
+    instances = await fetch_dynamic_invidious_instances()
+    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True, verify=False) as client:
         for instance in instances:
             try:
                 res = await client.get(f"{instance}/api/v1/videos/{video_id}")
