@@ -3,6 +3,7 @@ import json
 import httpx
 import asyncio
 import urllib.parse
+import os
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
