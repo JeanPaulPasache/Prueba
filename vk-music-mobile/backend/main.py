@@ -1,4 +1,5 @@
 import httpx
+import urllib.parse
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -50,13 +51,13 @@ async def search_itunes_fallback(query: str):
                 for item in res.json().get("results", []):
                     artist = item.get("artistName", "Desconocido")
                     track = item.get("trackName", "Sin título")
-                    search_term = f"{artist} {track}"
+                    search_term = f"{artist} - {track}"
                     results.append({
                         "id": search_term,
                         "title": track,
                         "uploader": artist,
                         "duration": int(item.get("trackTimeMillis", 0) / 1000),
-                        "webpage_url": f"https://www.youtube.com/watch?v={httpx.QueryParams({'q': search_term})['q']}"
+                        "webpage_url": f"https://www.youtube.com/results?search_query={urllib.parse.quote(search_term)}"
                     })
                 return results
     except Exception:
@@ -93,21 +94,51 @@ async def search(q: str = Query(..., description="Término de búsqueda")):
 
     raise HTTPException(status_code=500, detail="No se pudieron obtener resultados de búsqueda.")
 
-@app.get("/get-audio")
-async def get_audio(url: str = Query(..., description="URL del video")):
-    target_url = url
-    if "youtube.com/results" in url:
-        query_str = url.split("search_query=")[-1]
-        target_url = f"https://www.youtube.com/watch?v={query_str}"
+async def resolve_video_id(query_or_url: str, instances: list) -> str:
+    """Extrae o resuelve un videoId válido de 11 caracteres desde una URL o término de búsqueda"""
+    # 1. Si ya es una URL con v=
+    if "v=" in query_or_url:
+        candidate = query_or_url.split("v=")[1].split("&")[0]
+        if len(candidate) == 11:
+            return candidate
 
-    video_id = None
-    if "v=" in target_url:
-        video_id = target_url.split("v=")[1].split("&")[0]
-    elif "youtu.be/" in target_url:
-        video_id = target_url.split("youtu.be/")[1].split("?")[0]
+    # 2. Si es una URL corta youtu.be
+    if "youtu.be/" in query_or_url:
+        candidate = query_or_url.split("youtu.be/")[1].split("?")[0]
+        if len(candidate) == 11:
+            return candidate
+
+    # 3. Si no es un ID válido, resolver buscando el término en Invidious
+    search_term = query_or_url
+    if "search_query=" in query_or_url:
+        search_term = urllib.parse.unquote(query_or_url.split("search_query=")[-1])
+
+    async with httpx.AsyncClient(timeout=5.0, headers=HEADERS, follow_redirects=True) as client:
+        for instance in instances:
+            try:
+                res = await client.get(f"{instance}/api/v1/search", params={"q": search_term, "type": "video"})
+                if res.status_code == 200:
+                    items = res.json()
+                    if isinstance(items, list) and len(items) > 0:
+                        v_id = items[0].get("videoId")
+                        if v_id and len(v_id) == 11:
+                            return v_id
+            except Exception:
+                continue
+    return None
+
+@app.get("/get-audio")
+async def get_audio(url: str = Query(..., description="URL o término de búsqueda del video")):
+    instances = await fetch_dynamic_invidious_instances()
+    video_id = await resolve_video_id(url, instances)
+
+    if not video_id:
+        raise HTTPException(status_code=400, detail="No se pudo resolver un ID de video válido para la solicitud.")
+
+    target_youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
     async with httpx.AsyncClient(timeout=10.0, headers=HEADERS, follow_redirects=True) as client:
-        # 1. Extraer a través de la API oficial de Cobalt v10 con Headers autorizados
+        # 1. Intentar extracción con la API oficial de Cobalt v10
         try:
             cobalt_headers = {
                 "Accept": "application/json",
@@ -115,7 +146,7 @@ async def get_audio(url: str = Query(..., description="URL del video")):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             }
             payload = {
-                "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else target_url,
+                "url": target_youtube_url,
                 "downloadMode": "audio",
                 "audioFormat": "mp3"
             }
@@ -131,29 +162,27 @@ async def get_audio(url: str = Query(..., description="URL del video")):
                         "audio_url": audio_url
                     }
         except Exception as e:
-            print(f"[COBALT MAIN ERROR]: {e}")
+            print(f"[COBALT ERROR]: {e}")
 
-        # 2. Respaldo directo a través de Invidious Audio Streams Proxy
-        if video_id:
-            instances = await fetch_dynamic_invidious_instances()
-            for instance in instances:
-                try:
-                    res = await client.get(f"{instance}/api/v1/videos/{video_id}")
-                    if res.status_code == 200:
-                        data = res.json()
-                        adaptive = data.get("adaptiveFormats", [])
-                        audio_streams = [f for f in adaptive if "audio" in f.get("type", "")]
-                        if audio_streams:
-                            stream_url = audio_streams[0].get("url")
-                            if not stream_url.startswith("http"):
-                                stream_url = f"{instance}{stream_url}"
-                            return {
-                                "title": data.get("title"),
-                                "uploader": data.get("author"),
-                                "duration": data.get("lengthSeconds"),
-                                "audio_url": stream_url
-                            }
-                except Exception as e:
-                    print(f"[INVIDIOUS AUDIO ERROR] {instance}: {e}")
+        # 2. Respaldo directo a través de Invidious Audio Streams
+        for instance in instances:
+            try:
+                res = await client.get(f"{instance}/api/v1/videos/{video_id}")
+                if res.status_code == 200:
+                    data = res.json()
+                    adaptive = data.get("adaptiveFormats", [])
+                    audio_streams = [f for f in adaptive if "audio" in f.get("type", "")]
+                    if audio_streams:
+                        stream_url = audio_streams[0].get("url")
+                        if not stream_url.startswith("http"):
+                            stream_url = f"{instance}{stream_url}"
+                        return {
+                            "title": data.get("title"),
+                            "uploader": data.get("author"),
+                            "duration": data.get("lengthSeconds"),
+                            "audio_url": stream_url
+                        }
+            except Exception as e:
+                print(f"[INVIDIOUS AUDIO ERROR] {instance}: {e}")
 
-    raise HTTPException(status_code=500, detail="No se pudo extraer el enlace directo de audio.")
+    raise HTTPException(status_code=500, detail="No se pudo extraer el enlace de audio para este video.")
