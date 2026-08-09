@@ -1,4 +1,3 @@
-import re
 import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +14,16 @@ app.add_middleware(
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+    "Accept": "application/json",
+    "Content-Type": "application/json"
 }
+
+# Instancias públicas de Cobalt para rotación en caso de fallo
+COBALT_INSTANCES = [
+    "https://api.cobalt.tools",
+    "https://cobalt-api.kwiatek.xyz",
+    "https://api.cobalt.vmn.moe"
+]
 
 @app.get("/")
 def health_check():
@@ -50,13 +57,12 @@ async def search_itunes_fallback(query: str):
                 for item in res.json().get("results", []):
                     artist = item.get("artistName", "Desconocido")
                     track = item.get("trackName", "Sin título")
-                    search_term = f"{artist} {track}"
                     results.append({
-                        "id": search_term,
+                        "id": f"{artist} {track}",
                         "title": track,
                         "uploader": artist,
                         "duration": int(item.get("trackTimeMillis", 0) / 1000),
-                        "webpage_url": f"https://www.youtube.com/watch?v={httpx.QueryParams({'q': search_term})['q']}"
+                        "webpage_url": f"https://www.youtube.com/results?search_query={httpx.QueryParams({'q': f'{artist} {track}'})['q']}"
                     })
                 return results
     except Exception:
@@ -93,70 +99,44 @@ async def search(q: str = Query(..., description="Término de búsqueda")):
 
     raise HTTPException(status_code=500, detail="No se pudieron obtener resultados de búsqueda.")
 
-async def extract_audio_y2mate(video_id: str):
-    """Extrae el enlace directo MP3/M4A usando la API pública de Y2Mate"""
-    try:
-        async with httpx.AsyncClient(timeout=10.0, headers=HEADERS, follow_redirects=True) as client:
-            # Step 1: Analyze Video
-            analyze_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
-            payload = {"k_query": f"https://www.youtube.com/watch?v={video_id}", "k_page": "home", "hl": "es", "q_auto": 0}
-            res = await client.post(analyze_url, data=payload)
-            if res.status_code == 200:
-                data = res.json()
-                links = data.get("links", {}).get("mp3", {})
-                
-                # Seleccionar la clave de conversión de la mejor calidad
-                auto_key = None
-                for quality in ["auto", "128", "320", "192"]:
-                    if quality in links:
-                        auto_key = links[quality].get("k")
-                        break
-                
-                if not auto_key and links:
-                    first_item = list(links.values())[0]
-                    auto_key = first_item.get("k")
-
-                if auto_key:
-                    # Step 2: Convert Key to Direct Link
-                    convert_url = "https://www.y2mate.com/mates/convertV2/index"
-                    conv_payload = {"vid": video_id, "k": auto_key}
-                    conv_res = await client.post(convert_url, data=conv_payload)
-                    if conv_res.status_code == 200:
-                        c_data = conv_res.json()
-                        d_link = c_data.get("dlink")
-                        if d_link:
-                            return {
-                                "title": data.get("title", "Audio Stream"),
-                                "uploader": "Y2Mate Engine",
-                                "duration": 0,
-                                "audio_url": d_link
-                            }
-    except Exception as e:
-        print(f"[Y2MATE ERROR]: {e}")
-    return None
-
 @app.get("/get-audio")
 async def get_audio(url: str = Query(..., description="URL del video")):
-    # Extraer ID del video
-    video_id = None
-    if "v=" in url:
-        video_id = url.split("v=")[1].split("&")[0]
-    elif "youtu.be/" in url:
-        video_id = url.split("youtu.be/")[1].split("?")[0]
-    else:
-        # Extraer mediante búsqueda si el ID no es explícito
-        video_id = url.replace("https://www.youtube.com/watch?v=", "")
+    # Normalizar la URL de búsqueda si viene formateada desde iTunes
+    target_url = url
+    if "youtube.com/results" in url:
+        query_str = url.split("search_query=")[-1]
+        target_url = f"https://www.youtube.com/watch?v={query_str}"
 
-    # 1. Intentar extracción rápida con Y2Mate
-    if video_id and len(video_id) == 11:
-        y2mate_data = await extract_audio_y2mate(video_id)
-        if y2mate_data:
-            return y2mate_data
+    async with httpx.AsyncClient(timeout=8.0, headers=HEADERS, follow_redirects=True) as client:
+        # 1. Intentar extracción rápida vía instancias de Cobalt (v10 Spec)
+        for base_url in COBALT_INSTANCES:
+            try:
+                payload = {
+                    "url": target_url,
+                    "downloadMode": "audio",
+                    "audioFormat": "mp3"
+                }
+                res = await client.post(base_url, json=payload)
+                if res.status_code in [200, 201]:
+                    data = res.json()
+                    audio_url = data.get("url")
+                    if audio_url:
+                        return {
+                            "title": "Audio Stream",
+                            "uploader": "Cobalt Engine",
+                            "duration": 0,
+                            "audio_url": audio_url
+                        }
+            except Exception as e:
+                print(f"[COBALT ERROR] {base_url}: {e}")
 
-    # 2. Respaldo a través de proxies Invidious de audio
-    if video_id:
-        instances = await fetch_dynamic_invidious_instances()
-        async with httpx.AsyncClient(timeout=8.0, headers=HEADERS, follow_redirects=True) as client:
+        # 2. Respaldo directo a través de Invidious
+        video_id = None
+        if "v=" in target_url:
+            video_id = target_url.split("v=")[1].split("&")[0]
+
+        if video_id:
+            instances = await fetch_dynamic_invidious_instances()
             for instance in instances:
                 try:
                     res = await client.get(f"{instance}/api/v1/videos/{video_id}")
@@ -165,7 +145,6 @@ async def get_audio(url: str = Query(..., description="URL del video")):
                         adaptive = data.get("adaptiveFormats", [])
                         audio_streams = [f for f in adaptive if "audio" in f.get("type", "")]
                         if audio_streams:
-                            # Utilizar el proxy propio de la instancia de Invidious para saltar el bloqueo de IP móvil
                             stream_url = audio_streams[0].get("url")
                             if not stream_url.startswith("http"):
                                 stream_url = f"{instance}{stream_url}"
