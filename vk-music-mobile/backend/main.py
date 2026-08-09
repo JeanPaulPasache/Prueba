@@ -1,4 +1,3 @@
-import os
 import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,82 +12,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Instancias públicas de respaldo para Piped e Invidious
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://pipedapi.mha.fi",
+    "https://pipedapi.rh2.kavin.rocks"
+]
+
+INVIDIOUS_INSTANCES = [
+    "https://invidious.nerdvpn.de",
+    "https://inv.tux.pizza",
+    "https://invidious.drgns.space",
+    "https://vid.puffyan.us",
+    "https://invidious.projectsegfau.lt"
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+}
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API activa"}
 
-async def get_healthy_invidious_instances():
-    """Obtiene instancias activas y saludables de Invidious desde el registro oficial"""
-    url = "https://api.invidious.io/instances.json?sort_by=type,health"
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(url)
-            if res.status_code == 200:
-                data = res.json()
-                instances = []
-                for domain, info in data:
-                    # Filtrar instancias que soportan API y tienen buen estado
-                    if info.get("type") == "https" and info.get("api") and info.get("health") and float(info.get("health", 0)) > 80:
-                        instances.append(info.get("uri"))
-                return instances[:5] # Devolver las 5 mejores
-    except Exception:
-        pass
-    
-    # Lista de respaldo fija si falla la consulta dinámica
-    return [
-        "https://invidious.nerdvpn.de",
-        "https://inv.tux.pizza",
-        "https://invidious.drgns.space",
-        "https://vid.puffyan.us"
-    ]
-
 @app.get("/search")
 async def search(q: str = Query(..., description="Término de búsqueda")):
-    instances = await get_healthy_invidious_instances()
-    
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        for instance in instances:
+    async with httpx.AsyncClient(timeout=6.0, headers=HEADERS, follow_redirects=True) as client:
+        # 1. Intentar búsqueda con Piped
+        for instance in PIPED_INSTANCES:
             try:
-                url = f"{instance}/api/v1/search"
-                res = await client.get(url, params={"q": q, "type": "video"})
+                res = await client.get(f"{instance}/search", params={"q": q, "filter": "music_songs"})
                 if res.status_code == 200:
-                    items = res.json()
+                    items = res.json().get("items", [])
                     results = []
                     for item in items[:10]:
-                        results.append({
-                            "id": item.get("videoId"),
-                            "title": item.get("title"),
-                            "uploader": item.get("author") or "Desconocido",
-                            "duration": item.get("lengthSeconds"),
-                            "webpage_url": f"https://www.youtube.com/watch?v={item.get('videoId')}"
-                        })
+                        if item.get("type") == "stream":
+                            video_id = item.get("url", "").replace("/watch?v=", "")
+                            results.append({
+                                "id": video_id,
+                                "title": item.get("title"),
+                                "uploader": item.get("uploaderName") or "Desconocido",
+                                "duration": item.get("duration"),
+                                "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
+                            })
                     if results:
                         return results
-            except Exception:
-                continue
+            except Exception as e:
+                print(f"[SEARCH ERROR] Piped ({instance}): {e}")
 
-    raise HTTPException(status_code=500, detail="No se pudieron obtener resultados de búsqueda")
+        # 2. Intentar búsqueda con Invidious
+        for instance in INVIDIOUS_INSTANCES:
+            try:
+                res = await client.get(f"{instance}/api/v1/search", params={"q": q, "type": "video"})
+                if res.status_code == 200:
+                    items = res.json()
+                    if isinstance(items, list):
+                        results = []
+                        for item in items[:10]:
+                            results.append({
+                                "id": item.get("videoId"),
+                                "title": item.get("title"),
+                                "uploader": item.get("author") or "Desconocido",
+                                "duration": item.get("lengthSeconds"),
+                                "webpage_url": f"https://www.youtube.com/watch?v={item.get('videoId')}"
+                            })
+                        if results:
+                            return results
+            except Exception as e:
+                print(f"[SEARCH ERROR] Invidious ({instance}): {e}")
 
-async def get_audio_from_cobalt(video_url: str):
-    """Obtiene el audio usando la API de Cobalt.tools como respaldo de alta velocidad"""
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            res = await client.post(
-                "https://api.cobalt.tools/api/json",
-                json={
-                    "url": video_url,
-                    "downloadMode": "audio",
-                    "audioFormat": "mp3"
-                },
-                headers={"Accept": "application/json", "Content-Type": "application/json"}
-            )
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("status") in ["stream", "redirect"]:
-                    return data.get("url")
-    except Exception:
-        pass
-    return None
+    raise HTTPException(
+        status_code=500,
+        detail="No se pudo obtener resultados de búsqueda de las fuentes disponibles."
+    )
 
 @app.get("/get-audio")
 async def get_audio(url: str = Query(..., description="URL del video")):
@@ -98,38 +95,66 @@ async def get_audio(url: str = Query(..., description="URL del video")):
     elif "youtu.be/" in url:
         video_id = url.split("youtu.be/")[1].split("?")[0]
 
-    # 1. Intentar con instancias saludables de Invidious
-    if video_id:
-        instances = await get_healthy_invidious_instances()
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            for instance in instances:
+    async with httpx.AsyncClient(timeout=8.0, headers=HEADERS, follow_redirects=True) as client:
+        # 1. Intentar con Cobalt API
+        try:
+            res = await client.post(
+                "https://api.cobalt.tools/api/json",
+                json={"url": url, "downloadMode": "audio", "audioFormat": "mp3"},
+                headers={"Accept": "application/json", "Content-Type": "application/json", **HEADERS}
+            )
+            if res.status_code == 200:
+                data = res.json()
+                audio_url = data.get("url")
+                if audio_url:
+                    return {
+                        "title": "Audio Track",
+                        "uploader": "YouTube",
+                        "duration": 0,
+                        "audio_url": audio_url
+                    }
+        except Exception as e:
+            print(f"[AUDIO ERROR] Cobalt: {e}")
+
+        # 2. Intentar con Piped Streams
+        if video_id:
+            for instance in PIPED_INSTANCES:
+                try:
+                    res = await client.get(f"{instance}/streams/{video_id}")
+                    if res.status_code == 200:
+                        data = res.json()
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            best = next((s for s in audio_streams if s.get("mimeType") == "audio/mp4"), audio_streams[0])
+                            return {
+                                "title": data.get("title"),
+                                "uploader": data.get("uploader"),
+                                "duration": data.get("duration"),
+                                "audio_url": best.get("url")
+                            }
+                except Exception as e:
+                    print(f"[AUDIO ERROR] Piped ({instance}): {e}")
+
+        # 3. Intentar con Invidious Streams
+        if video_id:
+            for instance in INVIDIOUS_INSTANCES:
                 try:
                     res = await client.get(f"{instance}/api/v1/videos/{video_id}")
                     if res.status_code == 200:
                         data = res.json()
-                        adaptive_formats = data.get("adaptiveFormats", [])
-                        # Buscar streams de audio
-                        audio_streams = [f for f in adaptive_formats if "audio" in f.get("type", "")]
+                        adaptive = data.get("adaptiveFormats", [])
+                        audio_streams = [f for f in adaptive if "audio" in f.get("type", "")]
                         if audio_streams:
-                            # Elegir el mejor stream de audio
-                            best_audio = audio_streams[0]
                             return {
                                 "title": data.get("title"),
                                 "uploader": data.get("author"),
                                 "duration": data.get("lengthSeconds"),
-                                "audio_url": best_audio.get("url")
+                                "audio_url": audio_streams[0].get("url")
                             }
-                except Exception:
-                    continue
+                except Exception as e:
+                    print(f"[AUDIO ERROR] Invidious ({instance}): {e}")
 
-    # 2. Respaldo directo mediante la API de Cobalt
-    cobalt_url = await get_audio_from_cobalt(url)
-    if cobalt_url:
-        return {
-            "title": "Audio Stream",
-            "uploader": "YouTube",
-            "duration": 0,
-            "audio_url": cobalt_url
-        }
-
-    raise HTTPException(status_code=500, detail="No se pudo extraer el enlace de audio de YouTube")
+    raise HTTPException(
+        status_code=500,
+        detail="No se pudo extraer el stream de audio."
+    )
