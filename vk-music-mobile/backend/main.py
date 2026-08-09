@@ -13,17 +13,10 @@ app.add_middleware(
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json",
     "Content-Type": "application/json"
 }
-
-# Instancias públicas de Cobalt para rotación en caso de fallo
-COBALT_INSTANCES = [
-    "https://api.cobalt.tools",
-    "https://cobalt-api.kwiatek.xyz",
-    "https://api.cobalt.vmn.moe"
-]
 
 @app.get("/")
 def health_check():
@@ -57,12 +50,13 @@ async def search_itunes_fallback(query: str):
                 for item in res.json().get("results", []):
                     artist = item.get("artistName", "Desconocido")
                     track = item.get("trackName", "Sin título")
+                    search_term = f"{artist} {track}"
                     results.append({
-                        "id": f"{artist} {track}",
+                        "id": search_term,
                         "title": track,
                         "uploader": artist,
                         "duration": int(item.get("trackTimeMillis", 0) / 1000),
-                        "webpage_url": f"https://www.youtube.com/results?search_query={httpx.QueryParams({'q': f'{artist} {track}'})['q']}"
+                        "webpage_url": f"https://www.youtube.com/watch?v={httpx.QueryParams({'q': search_term})['q']}"
                     })
                 return results
     except Exception:
@@ -101,40 +95,45 @@ async def search(q: str = Query(..., description="Término de búsqueda")):
 
 @app.get("/get-audio")
 async def get_audio(url: str = Query(..., description="URL del video")):
-    # Normalizar la URL de búsqueda si viene formateada desde iTunes
     target_url = url
     if "youtube.com/results" in url:
         query_str = url.split("search_query=")[-1]
         target_url = f"https://www.youtube.com/watch?v={query_str}"
 
-    async with httpx.AsyncClient(timeout=8.0, headers=HEADERS, follow_redirects=True) as client:
-        # 1. Intentar extracción rápida vía instancias de Cobalt (v10 Spec)
-        for base_url in COBALT_INSTANCES:
-            try:
-                payload = {
-                    "url": target_url,
-                    "downloadMode": "audio",
-                    "audioFormat": "mp3"
-                }
-                res = await client.post(base_url, json=payload)
-                if res.status_code in [200, 201]:
-                    data = res.json()
-                    audio_url = data.get("url")
-                    if audio_url:
-                        return {
-                            "title": "Audio Stream",
-                            "uploader": "Cobalt Engine",
-                            "duration": 0,
-                            "audio_url": audio_url
-                        }
-            except Exception as e:
-                print(f"[COBALT ERROR] {base_url}: {e}")
+    video_id = None
+    if "v=" in target_url:
+        video_id = target_url.split("v=")[1].split("&")[0]
+    elif "youtu.be/" in target_url:
+        video_id = target_url.split("youtu.be/")[1].split("?")[0]
 
-        # 2. Respaldo directo a través de Invidious
-        video_id = None
-        if "v=" in target_url:
-            video_id = target_url.split("v=")[1].split("&")[0]
+    async with httpx.AsyncClient(timeout=10.0, headers=HEADERS, follow_redirects=True) as client:
+        # 1. Extraer a través de la API oficial de Cobalt v10 con Headers autorizados
+        try:
+            cobalt_headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            }
+            payload = {
+                "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else target_url,
+                "downloadMode": "audio",
+                "audioFormat": "mp3"
+            }
+            res = await client.post("https://api.cobalt.tools/", json=payload, headers=cobalt_headers)
+            if res.status_code in [200, 201]:
+                data = res.json()
+                audio_url = data.get("url")
+                if audio_url:
+                    return {
+                        "title": "Audio Stream",
+                        "uploader": "VK Engine",
+                        "duration": 0,
+                        "audio_url": audio_url
+                    }
+        except Exception as e:
+            print(f"[COBALT MAIN ERROR]: {e}")
 
+        # 2. Respaldo directo a través de Invidious Audio Streams Proxy
         if video_id:
             instances = await fetch_dynamic_invidious_instances()
             for instance in instances:
@@ -154,7 +153,7 @@ async def get_audio(url: str = Query(..., description="URL del video")):
                                 "duration": data.get("lengthSeconds"),
                                 "audio_url": stream_url
                             }
-                except Exception:
-                    continue
+                except Exception as e:
+                    print(f"[INVIDIOUS AUDIO ERROR] {instance}: {e}")
 
     raise HTTPException(status_code=500, detail="No se pudo extraer el enlace directo de audio.")
