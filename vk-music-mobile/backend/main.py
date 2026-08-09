@@ -2,11 +2,9 @@ import os
 import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp
 
 app = FastAPI(title="VK Music API", redirect_slashes=True)
 
-# Habilitar CORS para React Native / Expo
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,99 +13,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Instancias públicas de Piped API
-PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://api.piped.yt",
-    "https://pipedapi.mha.fi",
-    "https://piped-api.garudalinux.org"
-]
-
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API activa"}
 
-async def search_piped(query: str):
-    """Busca canciones usando instancias públicas de Piped"""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for instance in PIPED_INSTANCES:
+async def get_healthy_invidious_instances():
+    """Obtiene instancias activas y saludables de Invidious desde el registro oficial"""
+    url = "https://api.invidious.io/instances.json?sort_by=type,health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(url)
+            if res.status_code == 200:
+                data = res.json()
+                instances = []
+                for domain, info in data:
+                    # Filtrar instancias que soportan API y tienen buen estado
+                    if info.get("type") == "https" and info.get("api") and info.get("health") and float(info.get("health", 0)) > 80:
+                        instances.append(info.get("uri"))
+                return instances[:5] # Devolver las 5 mejores
+    except Exception:
+        pass
+    
+    # Lista de respaldo fija si falla la consulta dinámica
+    return [
+        "https://invidious.nerdvpn.de",
+        "https://inv.tux.pizza",
+        "https://invidious.drgns.space",
+        "https://vid.puffyan.us"
+    ]
+
+@app.get("/search")
+async def search(q: str = Query(..., description="Término de búsqueda")):
+    instances = await get_healthy_invidious_instances()
+    
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for instance in instances:
             try:
-                res = await client.get(f"{instance}/search", params={"q": query, "filter": "music_songs"})
+                url = f"{instance}/api/v1/search"
+                res = await client.get(url, params={"q": q, "type": "video"})
                 if res.status_code == 200:
-                    data = res.json()
-                    items = data.get("items", [])
+                    items = res.json()
                     results = []
                     for item in items[:10]:
-                        if item.get("type") == "stream":
-                            video_id = item.get("url", "").replace("/watch?v=", "")
-                            results.append({
-                                "id": video_id,
-                                "title": item.get("title"),
-                                "uploader": item.get("uploaderName") or "Desconocido",
-                                "duration": item.get("duration"),
-                                "webpage_url": f"https://www.youtube.com/watch?v={video_id}"
-                            })
+                        results.append({
+                            "id": item.get("videoId"),
+                            "title": item.get("title"),
+                            "uploader": item.get("author") or "Desconocido",
+                            "duration": item.get("lengthSeconds"),
+                            "webpage_url": f"https://www.youtube.com/watch?v={item.get('videoId')}"
+                        })
                     if results:
                         return results
             except Exception:
                 continue
-    return None
 
-@app.get("/search")
-async def search(q: str = Query(..., description="Término de búsqueda")):
-    # 1. Intentar búsqueda vía Piped (libre de bloqueos de IP de datacenter)
-    piped_results = await search_piped(q)
-    if piped_results:
-        return piped_results
+    raise HTTPException(status_code=500, detail="No se pudieron obtener resultados de búsqueda")
 
-    # 2. Respaldo vía yt-dlp
-    ydl_opts = {
-        'extract_flat': 'in_playlist',
-        'skip_download': True,
-        'quiet': True,
-        'no_warnings': True,
-    }
+async def get_audio_from_cobalt(video_url: str):
+    """Obtiene el audio usando la API de Cobalt.tools como respaldo de alta velocidad"""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch5:{q}", download=False)
-            results = []
-            entries = info.get('entries', []) if info else []
-            for entry in entries:
-                if not entry:
-                    continue
-                results.append({
-                    "id": entry.get("id"),
-                    "title": entry.get("title"),
-                    "uploader": entry.get("uploader") or entry.get("channel") or "Desconocido",
-                    "duration": entry.get("duration"),
-                    "webpage_url": entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                })
-            return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la búsqueda: {str(e)}")
-
-async def get_audio_from_piped(video_id: str):
-    """Obtiene el enlace directo de audio usando Piped"""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for instance in PIPED_INSTANCES:
-            try:
-                res = await client.get(f"{instance}/streams/{video_id}")
-                if res.status_code == 200:
-                    data = res.json()
-                    audio_streams = data.get("audioStreams", [])
-                    if audio_streams:
-                        best_stream = next(
-                            (s for s in audio_streams if s.get("mimeType") == "audio/mp4"),
-                            audio_streams[0]
-                        )
-                        return {
-                            "title": data.get("title"),
-                            "uploader": data.get("uploader"),
-                            "duration": data.get("duration"),
-                            "audio_url": best_stream.get("url")
-                        }
-            except Exception:
-                continue
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            res = await client.post(
+                "https://api.cobalt.tools/api/json",
+                json={
+                    "url": video_url,
+                    "downloadMode": "audio",
+                    "audioFormat": "mp3"
+                },
+                headers={"Accept": "application/json", "Content-Type": "application/json"}
+            )
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("status") in ["stream", "redirect"]:
+                    return data.get("url")
+    except Exception:
+        pass
     return None
 
 @app.get("/get-audio")
@@ -118,26 +98,38 @@ async def get_audio(url: str = Query(..., description="URL del video")):
     elif "youtu.be/" in url:
         video_id = url.split("youtu.be/")[1].split("?")[0]
 
-    # 1. Intentar vía Piped
+    # 1. Intentar con instancias saludables de Invidious
     if video_id:
-        piped_data = await get_audio_from_piped(video_id)
-        if piped_data:
-            return piped_data
+        instances = await get_healthy_invidious_instances()
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for instance in instances:
+                try:
+                    res = await client.get(f"{instance}/api/v1/videos/{video_id}")
+                    if res.status_code == 200:
+                        data = res.json()
+                        adaptive_formats = data.get("adaptiveFormats", [])
+                        # Buscar streams de audio
+                        audio_streams = [f for f in adaptive_formats if "audio" in f.get("type", "")]
+                        if audio_streams:
+                            # Elegir el mejor stream de audio
+                            best_audio = audio_streams[0]
+                            return {
+                                "title": data.get("title"),
+                                "uploader": data.get("author"),
+                                "duration": data.get("lengthSeconds"),
+                                "audio_url": best_audio.get("url")
+                            }
+                except Exception:
+                    continue
 
-    # 2. Respaldo vía yt-dlp
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return {
-                "title": info.get("title"),
-                "uploader": info.get("uploader"),
-                "duration": info.get("duration"),
-                "audio_url": info.get("url")
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al obtener audio: {str(e)}")
+    # 2. Respaldo directo mediante la API de Cobalt
+    cobalt_url = await get_audio_from_cobalt(url)
+    if cobalt_url:
+        return {
+            "title": "Audio Stream",
+            "uploader": "YouTube",
+            "duration": 0,
+            "audio_url": cobalt_url
+        }
+
+    raise HTTPException(status_code=500, detail="No se pudo extraer el enlace de audio de YouTube")
