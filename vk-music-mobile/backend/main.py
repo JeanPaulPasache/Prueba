@@ -20,76 +20,65 @@ app.add_middleware(
 
 RENDER_SECRET_COOKIE = "/etc/secrets/cookies.txt"
 LOCAL_COOKIE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+CLEAN_COOKIE_FILE = "/tmp/cookies_sanitized.txt"
 
-def resolve_cookie_path():
+def sanitize_and_get_cookie_path() -> str | None:
+    """Busca el archivo de cookies y arregla los tabuladores en /tmp si Render los convirtió en espacios."""
+    raw_path = None
     if os.path.exists(RENDER_SECRET_COOKIE):
-        print(f"[COOKIES LOG]: Encontrado archivo en Render Secret File: {RENDER_SECRET_COOKIE}")
-        return RENDER_SECRET_COOKIE
+        raw_path = RENDER_SECRET_COOKIE
     elif os.path.exists(LOCAL_COOKIE):
-        print(f"[COOKIES LOG]: Encontrado archivo local: {LOCAL_COOKIE}")
-        return LOCAL_COOKIE
-    print("[COOKIES LOG]: No se encontró ningún archivo cookies.txt")
-    return None
+        raw_path = LOCAL_COOKIE
 
-COOKIE_PATH = resolve_cookie_path()
+    if not raw_path:
+        return None
 
-@app.get("/debug-cookies")
-def debug_cookies():
-    """Endpoint para verificar el estado de las cookies en el servidor"""
-    if not COOKIE_PATH:
-        return {"status": "error", "message": "No se encontró el archivo cookies.txt"}
-    
     try:
-        with open(COOKIE_PATH, "r", encoding="utf-8") as f:
+        with open(raw_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
-        has_sid = any("SID" in line for line in lines)
-        has_login_info = any("LOGIN_INFO" in line for line in lines)
-        
-        return {
-            "status": "ok",
-            "path": COOKIE_PATH,
-            "total_lines": len(lines),
-            "contains_SID": has_sid,
-            "contains_LOGIN_INFO": has_login_info,
-        }
+
+        cleaned_lines = []
+        has_netscape_header = False
+
+        # Verificar encabezado
+        for line in lines:
+            if line.strip().startswith("# Netscape") or line.strip().startswith("# HTTP Cookie"):
+                has_netscape_header = True
+                break
+
+        if not has_netscape_header:
+            cleaned_lines.append("# Netscape HTTP Cookie File\n")
+
+        # Reemplazar múltiples espacios por tabuladores reales (\t)
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                if stripped.startswith("#"):
+                    cleaned_lines.append(stripped + "\n")
+                continue
+
+            # Separar por cualquier cantidad de espacios/tabs y unir con \t
+            parts = re.split(r'\s+', stripped)
+            if len(parts) >= 7:
+                # Reensamblar con tabuladores exactos (los primeros 6 campos + el valor)
+                domain, flag, path, secure, expiration, name = parts[:6]
+                val = " ".join(parts[6:])
+                clean_line = f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{val}\n"
+                cleaned_lines.append(clean_line)
+
+        # Guardar archivo sanitized en /tmp
+        with open(CLEAN_COOKIE_FILE, "w", encoding="utf-8") as f:
+            f.writelines(cleaned_lines)
+
+        print(f"[COOKIES SANITIZER]: Cookies procesadas con éxito en {CLEAN_COOKIE_FILE}")
+        return CLEAN_COOKIE_FILE
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print(f"[COOKIES SANITIZER ERROR]: {e}")
+        return raw_path
 
-def sync_extract_test(url: str):
-    opts = {
-        'quiet': False,  # Muestra el log detallado de yt-dlp en Render
-        'no_warnings': False,
-        'skip_download': True,
-        'nocheckcertificate': True,
-        'cookiefile': COOKIE_PATH if COOKIE_PATH else None,
-        # Forzar clientes web/mweb para intentar mitigar la detección
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web', 'mweb', 'ios']
-            }
-        }
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
-
-@app.get("/test-download")
-def test_download(v: str = "dQw4w9WgXcQ"):
-    """Prueba de extracción directa con logs hacia la consola"""
-    try:
-        info = sync_extract_test(f"https://www.youtube.com/watch?v={v}")
-        return {"status": "success", "title": info.get("title")}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en yt-dlp: {str(e)}")
-
-def get_cookie_path():
-    if os.path.exists(RENDER_SECRET_COOKIE):
-        return RENDER_SECRET_COOKIE
-    elif os.path.exists(LOCAL_COOKIE):
-        return LOCAL_COOKIE
-    return None
-
-COOKIE_FILE = get_cookie_path()
+# Obtener la ruta limpia
+COOKIE_PATH = sanitize_and_get_cookie_path()
 
 def get_ytdlp_opts(extra_opts: dict = None) -> dict:
     opts = {
@@ -98,21 +87,47 @@ def get_ytdlp_opts(extra_opts: dict = None) -> dict:
         'skip_download': True,
         'nocheckcertificate': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'mweb'],
+                'player_skip': ['configs', 'webpage']
+            }
+        }
     }
 
-    if COOKIE_FILE:
-        opts['cookiefile'] = COOKIE_FILE
+    if COOKIE_PATH and os.path.exists(COOKIE_PATH):
+        opts['cookiefile'] = COOKIE_PATH
 
     if extra_opts:
         opts.update(extra_opts)
 
     return opts
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+@app.get("/debug-cookies")
+def debug_cookies():
+    if not COOKIE_PATH or not os.path.exists(COOKIE_PATH):
+        return {"status": "error", "message": "No se encontró archivo de cookies"}
+    
+    with open(COOKIE_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+        
+    return {
+        "status": "ok",
+        "sanitized_path": COOKIE_PATH,
+        "total_lines": len(lines),
+        "first_line": lines[0] if lines else "",
+        "contains_tabs": any("\t" in line for line in lines)
+    }
+
+@app.get("/test-download")
+def test_download(v: str = "dQw4w9WgXcQ"):
+    try:
+        opts = get_ytdlp_opts({'quiet': False})
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={v}", download=False)
+            return {"status": "success", "title": info.get("title")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en yt-dlp: {str(e)}")
 
 @app.get("/")
 def health_check():
