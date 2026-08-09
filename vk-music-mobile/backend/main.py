@@ -21,6 +21,26 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Lista de instancias Piped estables
+PIPED_INSTANCES = [
+    "https://api.piped.privacydev.net",
+    "https://pipedapi.palvelu.net",
+    "https://pipedapi.mha.fi",
+    "https://piped-api.garudalinux.org",
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.kavin.rocks"
+]
+
+# Lista de instancias Invidious estables
+INVIDIOUS_INSTANCES = [
+    "https://invidious.nerdvpn.de",
+    "https://inv.tux.pizza",
+    "https://invidious.projectsegfau.lt",
+    "https://invidious.privacydev.net",
+    "https://inv.in.projectsegfau.lt",
+    "https://invidious.drgns.space"
+]
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "API activa"}
@@ -86,7 +106,7 @@ async def search_youtube_direct(query: str):
     search_term = urllib.parse.unquote(urllib.parse.unquote(search_term))
 
     url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(search_term)}"
-    async with httpx.AsyncClient(timeout=7.0, headers=HEADERS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=7.0, headers=HEADERS, follow_redirects=True, verify=False) as client:
         try:
             res = await client.get(url)
             if res.status_code == 200:
@@ -112,7 +132,7 @@ async def search_youtube_direct(query: str):
 
 async def fetch_dynamic_invidious_instances():
     try:
-        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": HEADERS["User-Agent"]}) as client:
+        async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": HEADERS["User-Agent"]}, verify=False) as client:
             res = await client.get("https://api.invidious.io/instances.json?sort_by=health")
             if res.status_code == 200:
                 healthy = []
@@ -127,11 +147,11 @@ async def fetch_dynamic_invidious_instances():
                     return healthy[:5]
     except Exception:
         pass
-    return ["https://invidious.nerdvpn.de", "https://inv.tux.pizza", "https://invidious.drgns.space"]
+    return INVIDIOUS_INSTANCES
 
 async def search_itunes_fallback(query: str):
     try:
-        async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": HEADERS["User-Agent"]}) as client:
+        async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": HEADERS["User-Agent"]}, verify=False) as client:
             res = await client.get("https://itunes.apple.com/search", params={"term": query, "media": "music", "limit": 10})
             if res.status_code == 200:
                 results = []
@@ -153,14 +173,12 @@ async def search_itunes_fallback(query: str):
 
 @app.get("/search")
 async def search(q: str = Query(..., description="Término de búsqueda")):
-    # 1. Búsqueda directa en YouTube via scraping
     yt_results = await search_youtube_direct(q)
     if yt_results:
         return yt_results
 
-    # 2. Respaldo con Invidious
     instances = await fetch_dynamic_invidious_instances()
-    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True, verify=False) as client:
         for instance in instances:
             try:
                 res = await client.get(f"{instance}/api/v1/search", params={"q": q, "type": "video"})
@@ -181,7 +199,6 @@ async def search(q: str = Query(..., description="Término de búsqueda")):
             except Exception:
                 continue
 
-    # 3. Respaldo con iTunes
     itunes_results = await search_itunes_fallback(q)
     if itunes_results:
         return itunes_results
@@ -189,32 +206,31 @@ async def search(q: str = Query(..., description="Término de búsqueda")):
     raise HTTPException(status_code=500, detail="No se pudieron obtener resultados de búsqueda.")
 
 async def resolve_video_id(query_or_url: str) -> str | None:
-    # 1. Extraer ID directamente si ya está en la URL
     direct_id = extract_youtube_id(query_or_url)
     if direct_id:
         return direct_id
 
-    # 2. Resolver realizando una búsqueda en YouTube
     yt_results = await search_youtube_direct(query_or_url)
     if yt_results and yt_results[0].get("id"):
         return yt_results[0]["id"]
 
-    # 3. Respaldo vía Piped API
-    try:
-        clean_query = urllib.parse.unquote(urllib.parse.unquote(query_or_url))
-        if "search_query=" in clean_query:
-            clean_query = clean_query.split("search_query=")[-1]
-        async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": HEADERS["User-Agent"]}) as client:
-            piped_res = await client.get("https://pipedapi.kavin.rocks/search", params={"q": clean_query, "filter": "videos"})
-            if piped_res.status_code == 200:
-                items = piped_res.json().get("items", [])
-                if items:
-                    raw_url = items[0].get("url", "")
-                    pipe_id = extract_youtube_id(raw_url)
-                    if pipe_id:
-                        return pipe_id
-    except Exception:
-        pass
+    clean_query = urllib.parse.unquote(urllib.parse.unquote(query_or_url))
+    if "search_query=" in clean_query:
+        clean_query = clean_query.split("search_query=")[-1]
+
+    async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": HEADERS["User-Agent"]}, verify=False) as client:
+        for p_inst in PIPED_INSTANCES:
+            try:
+                piped_res = await client.get(f"{p_inst}/search", params={"q": clean_query, "filter": "videos"})
+                if piped_res.status_code == 200:
+                    items = piped_res.json().get("items", [])
+                    if items:
+                        raw_url = items[0].get("url", "")
+                        pipe_id = extract_youtube_id(raw_url)
+                        if pipe_id:
+                            return pipe_id
+            except Exception:
+                continue
 
     return None
 
@@ -227,13 +243,15 @@ async def get_audio(url: str = Query(..., description="URL o término de búsque
 
     target_youtube_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True) as client:
-        # 1. Extracción vía API oficial de Cobalt v10
+    async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": HEADERS["User-Agent"]}, follow_redirects=True, verify=False) as client:
+        # 1. Extracción vía API oficial de Cobalt v10 con encabezados de origen
         try:
             cobalt_headers = {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": HEADERS["User-Agent"]
+                "User-Agent": HEADERS["User-Agent"],
+                "Origin": "https://cobalt.tools",
+                "Referer": "https://cobalt.tools/"
             }
             payload = {
                 "url": target_youtube_url,
@@ -254,23 +272,24 @@ async def get_audio(url: str = Query(..., description="URL o término de búsque
         except Exception as e:
             print(f"[COBALT ERROR]: {e}")
 
-        # 2. Respaldo vía Piped API streams
-        try:
-            piped_stream_res = await client.get(f"https://pipedapi.kavin.rocks/streams/{video_id}")
-            if piped_stream_res.status_code == 200:
-                stream_data = piped_stream_res.json()
-                audio_streams = stream_data.get("audioStreams", [])
-                if audio_streams:
-                    return {
-                        "title": stream_data.get("title", "Audio Stream"),
-                        "uploader": stream_data.get("uploader", "VK Engine"),
-                        "duration": stream_data.get("duration", 0),
-                        "audio_url": audio_streams[0].get("url")
-                    }
-        except Exception as e:
-            print(f"[PIPED STREAM ERROR]: {e}")
+        # 2. Respaldo iterativo en múltiples servidores de Piped API
+        for p_inst in PIPED_INSTANCES:
+            try:
+                piped_stream_res = await client.get(f"{p_inst}/streams/{video_id}")
+                if piped_stream_res.status_code == 200:
+                    stream_data = piped_stream_res.json()
+                    audio_streams = stream_data.get("audioStreams", [])
+                    if audio_streams:
+                        return {
+                            "title": stream_data.get("title", "Audio Stream"),
+                            "uploader": stream_data.get("uploader", "VK Engine"),
+                            "duration": stream_data.get("duration", 0),
+                            "audio_url": audio_streams[0].get("url")
+                        }
+            except Exception as e:
+                print(f"[PIPED STREAM ERROR] {p_inst}: {e}")
 
-        # 3. Respaldo vía Invidious Audio Streams
+        # 3. Respaldo iterativo en instancias de Invidious (con SSL Bypass)
         instances = await fetch_dynamic_invidious_instances()
         for instance in instances:
             try:
