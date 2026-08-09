@@ -20,7 +20,7 @@ telegram_client = Client(
     in_memory=True
 )
 
-BOT_USERNAME = "vkm_bot"
+BOT_USERNAME = "vkmusic_bot"
 
 @app.on_event("startup")
 async def startup():
