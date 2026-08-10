@@ -1,14 +1,11 @@
-export interface SearchResult {
+export interface Track {
   id: string;
-  title: string;
-  uploader?: string;
-  duration?: number;
-  webpage_url: string;
+  query: string;
+  fileName: string;
+  blobUrl: string;
+  downloadedAt: Date;
 }
 
-export interface AudioStreamData {
-  title: string;
-  uploader?: string;
-  duration?: number;
-  audio_url: string;
+export interface ApiError {
+  detail: string;
 }

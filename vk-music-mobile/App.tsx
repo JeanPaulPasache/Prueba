@@ -1,217 +1,131 @@
 import React, { useState, useEffect } from 'react';
-import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  ActivityIndicator,
-  SafeAreaView,
-  StatusBar,
-} from 'react-native';
+import { StyleSheet, Text, View, TextInput, TouchableOpacity, ActivityIndicator, FlatList, Alert } from 'react-native';
+import { Share } from 'react-native';
 import { Audio } from 'expo-av';
-import { searchOnline, getAudioStream } from './src/services/api';
-import type { SearchResult } from './src/types';
+import { downloadTrackToDevice, LocalTrack } from './src/services/api';
 
 export default function App() {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [loadingTrackId, setLoadingTrackId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
+  const [loading, setLoading] = useState(false);
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTitle, setCurrentTitle] = useState<string | null>(null);
+  const [currentTrack, setCurrentTrack] = useState<LocalTrack | null>(null);
+  const [tracks, setTracks] = useState<LocalTrack[]>([]);
 
   useEffect(() => {
-    return sound
-      ? () => {
-          sound.unloadAsync();
-        }
-      : undefined;
+    return sound ? () => { sound.unloadAsync(); } : undefined;
   }, [sound]);
 
-  async function handleSearch() {
+  const handleSearchAndDownload = async () => {
     if (!query.trim()) return;
-    setIsSearching(true);
-    setError(null);
 
+    setLoading(true);
     try {
-      const data = await searchOnline(query);
-      setResults(data);
-    } catch (err) {
-      setError('Error al conectar con la API en Render.');
+      const track = await downloadTrackToDevice(query);
+      setCurrentTrack(track);
+      setTracks((prev) => [track, ...prev]);
+      setQuery('');
+      Alert.alert('¡Éxito!', 'Canción descargada e instalada en el almacenamiento local.');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Error al obtener el audio.');
     } finally {
-      setIsSearching(false);
+      setLoading(false);
     }
-  }
+  };
 
-  async function playTrack(item: SearchResult) {
-    setLoadingTrackId(item.id);
-    setError(null);
+  const playAudio = async (track: LocalTrack) => {
+    if (sound) {
+      await sound.unloadAsync();
+    }
+    const { sound: newSound } = await Audio.Sound.createAsync(
+      { uri: track.localUri },
+      { shouldPlay: true }
+    );
+    setSound(newSound);
+    setCurrentTrack(track);
+    setIsPlaying(true);
 
-    try {
-      const streamData = await getAudioStream(item.webpage_url);
-
-      if (sound) {
-        await sound.unloadAsync();
+    newSound.setOnPlaybackStatusUpdate((status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        setIsPlaying(false);
       }
+    });
+  };
 
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-      });
-
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: streamData.audio_url },
-        { shouldPlay: true }
-      );
-
-      setSound(newSound);
-      setIsPlaying(true);
-      setCurrentTitle(streamData.title);
-    } catch (err) {
-      setError('No se pudo obtener o reproducir este audio.');
-    } finally {
-      setLoadingTrackId(null);
+  const handleShareOrExport = async (uri: string) => {
+    try {
+      await Share.share({ url: uri });
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'No se pudo compartir el archivo.');
     }
-  }
-
-  async function togglePlayPause() {
-    if (!sound) return;
-    if (isPlaying) {
-      await sound.pauseAsync();
-      setIsPlaying(false);
-    } else {
-      await sound.playAsync();
-      setIsPlaying(true);
-    }
-  }
-
-  function formatDuration(seconds?: number): string {
-    if (!seconds) return '--:--';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  }
+  };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#121212" />
-      
-      <Text style={styles.header}>VK Music Mobile</Text>
+    <View style={styles.container}>
+      <Text style={styles.title}>🎵 VK Music App</Text>
+      <Text style={styles.subtitle}>Guarda música MP3 en tu móvil</Text>
 
-      <View style={styles.searchContainer}>
+      <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          placeholder="Buscar canción o artista..."
+          placeholder="Artista - Canción..."
           placeholderTextColor="#888"
           value={query}
           onChangeText={setQuery}
-          onSubmitEditing={handleSearch}
         />
-        <TouchableOpacity style={styles.searchButton} onPress={handleSearch} disabled={isSearching}>
-          {isSearching ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <Text style={styles.buttonText}>Buscar</Text>
-          )}
+        <TouchableOpacity style={styles.button} onPress={handleSearchAndDownload} disabled={loading}>
+          <Text style={styles.buttonText}>{loading ? 'Cargando...' : 'Buscar'}</Text>
         </TouchableOpacity>
       </View>
 
-      {error && <Text style={styles.errorText}>{error}</Text>}
+      {loading && <ActivityIndicator size="large" color="#0088cc" style={{ marginVertical: 20 }} />}
 
-      <FlatList
-        data={results}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => {
-          const isLoadingThis = loadingTrackId === item.id;
-          return (
-            <View style={styles.trackCard}>
-              <View style={{ flex: 1, marginRight: 8 }}>
-                <Text style={styles.trackTitle} numberOfLines={1}>{item.title}</Text>
-                <Text style={styles.trackSubtitle}>
-                  {item.uploader || 'Artista'} • {formatDuration(item.duration)}
-                </Text>
-              </View>
-
-              <TouchableOpacity
-                style={styles.playButton}
-                onPress={() => playTrack(item)}
-                disabled={isLoadingThis}
-              >
-                {isLoadingThis ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <Text style={styles.buttonText}>▶ Sonar</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          );
-        }}
-      />
-
-      {currentTitle && (
-        <View style={styles.nowPlayingBar}>
-          <Text style={styles.nowPlayingText} numberOfLines={1}>
-            {currentTitle}
-          </Text>
-          <TouchableOpacity style={styles.controlButton} onPress={togglePlayPause}>
-            <Text style={styles.buttonText}>{isPlaying ? '⏸ Pausa' : '▶ Play'}</Text>
-          </TouchableOpacity>
+      {currentTrack && (
+        <View style={styles.playerCard}>
+          <Text style={styles.trackTitle}>Reproduciendo: {currentTrack.title}</Text>
+          <View style={styles.playerControls}>
+            <TouchableOpacity style={styles.playButton} onPress={() => playAudio(currentTrack)}>
+              <Text style={styles.buttonText}>{isPlaying ? 'Reactivar / Reproducir' : '▶️ Reproducir'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.shareButton} onPress={() => handleShareOrExport(currentTrack.localUri)}>
+              <Text style={styles.buttonText}>📁 Exportar MP3</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
-    </SafeAreaView>
+
+      <Text style={styles.sectionTitle}>Canciones en tu dispositivo:</Text>
+      <FlatList
+        data={tracks}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <View style={styles.trackItem}>
+            <Text style={styles.itemText}>🎵 {item.title}</Text>
+            <TouchableOpacity onPress={() => playAudio(item)}>
+              <Text style={styles.playText}>▶️ Escuchar</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#121212', paddingTop: 20 },
-  header: { fontSize: 22, fontWeight: 'bold', color: '#fff', paddingHorizontal: 16, marginBottom: 16 },
-  searchContainer: { flexDirection: 'row', paddingHorizontal: 16, marginBottom: 16, gap: 8 },
-  input: {
-    flex: 1,
-    backgroundColor: '#1e1e1e',
-    color: '#fff',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  searchButton: { backgroundColor: '#2563eb', paddingHorizontal: 16, borderRadius: 8, justifyContent: 'center' },
-  buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
-  errorText: { color: '#ef4444', paddingHorizontal: 16, marginBottom: 12 },
-  listContent: { paddingHorizontal: 16, paddingBottom: 100 },
-  trackCard: {
-    flexDirection: 'row',
-    backgroundColor: '#1e1e1e',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 8,
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  trackTitle: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
-  trackSubtitle: { color: '#aaa', fontSize: 12, marginTop: 4 },
-  playButton: { backgroundColor: '#16a34a', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6 },
-  nowPlayingBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: '#222',
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#333',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  nowPlayingText: { color: '#fff', flex: 1, marginRight: 12, fontWeight: '500' },
-  controlButton: { backgroundColor: '#2563eb', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6 },
+  container: { flex: 1, backgroundColor: '#121212', padding: 20, paddingTop: 60 },
+  title: { fontSize: 24, fontWeight: 'bold', color: '#fff', textAlign: 'center' },
+  subtitle: { fontSize: 14, color: '#aaa', textAlign: 'center', marginBottom: 20 },
+  inputContainer: { flexDirection: 'row', marginBottom: 20 },
+  input: { flex: 1, backgroundColor: '#1e1e1e', color: '#fff', padding: 12, borderRadius: 8, marginRight: 10 },
+  button: { backgroundColor: '#0088cc', justifyContent: 'center', paddingHorizontal: 20, borderRadius: 8 },
+  buttonText: { color: '#fff', fontWeight: 'bold' },
+  playerCard: { backgroundColor: '#1e1e1e', padding: 16, borderRadius: 8, marginBottom: 20 },
+  trackTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
+  playerControls: { flexDirection: 'row', justifyContent: 'space-between' },
+  playButton: { backgroundColor: '#2e7d32', padding: 10, borderRadius: 6, flex: 1, marginRight: 5, alignItems: 'center' },
+  shareButton: { backgroundColor: '#1565c0', padding: 10, borderRadius: 6, flex: 1, marginLeft: 5, alignItems: 'center' },
+  sectionTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginVertical: 10 },
+  trackItem: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#1e1e1e', padding: 12, borderRadius: 6, marginBottom: 8 },
+  itemText: { color: '#fff', flex: 1 },
+  playText: { color: '#4fc3f7', fontWeight: 'bold' }
 });
