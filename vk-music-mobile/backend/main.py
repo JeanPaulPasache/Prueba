@@ -150,34 +150,44 @@ async def get_track_url(
         bot_api_file_id = None
         
         async with httpx.AsyncClient() as client:
-            # A) Asegurar que no haya webhooks bloqueando getUpdates
+            # A) Asegurar que no haya webhooks activos
             await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
 
-            # B) Reintentar durante unos segundos buscando el último mensaje reenviado
-            for _ in range(5):
-                await asyncio.sleep(1.5)  # Tiempo para que Telegram registre el mensaje reenviado
+            # B) Buscar el archivo en los mensajes recibidos
+            for attempt in range(5):
+                await asyncio.sleep(1.5)
                 
-                # offset=-1 le pide a Telegram estrictamente el ÚLTIMO mensaje que llegó al bot
+                # Obtenemos las actualizaciones sin limitar con offset=-1
                 updates_res = await client.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
                 )
                 updates_data = updates_res.json()
 
+                # Print para inspeccionar en la consola de Render si vuelve a fallar
+                print(f"[DEBUG BOT API Intento {attempt + 1}]: {updates_data}")
+
                 if updates_data.get("ok") and updates_data.get("result"):
-                    last_update = updates_data["result"][-1]
-                    msg = last_update.get("message") or last_update.get("channel_post") or {}
-                    
-                    if "audio" in msg:
-                        bot_api_file_id = msg["audio"]["file_id"]
-                        break
+                    # Recorremos de las actualizaciones más recientes a las más antiguas
+                    for update in reversed(updates_data["result"]):
+                        msg = update.get("message") or update.get("channel_post") or {}
+                        
+                        # 🔑 Importante: Telegram puede enviarlo como 'audio' o como 'document'
+                        media_obj = msg.get("audio") or msg.get("document")
+                        
+                        if media_obj and "file_id" in media_obj:
+                            bot_api_file_id = media_obj["file_id"]
+                            break
+
+                if bot_api_file_id:
+                    break
 
             if not bot_api_file_id:
                 raise HTTPException(
                     status_code=500,
-                    detail="El mensaje llegó a Telegram pero la Bot API no devolvió el file_id. Intenta nuevamente."
+                    detail="El mensaje llegó a Telegram pero la Bot API no devolvió el file_id. Revisa la consola de Render para ver el Log de DEBUG."
                 )
 
-            # C) Obtener la ruta directa del archivo
+            # C) Obtener la ruta del archivo con getFile
             file_res = await client.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={bot_api_file_id}"
             )
