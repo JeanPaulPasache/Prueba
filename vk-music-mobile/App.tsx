@@ -1,131 +1,183 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, ActivityIndicator, FlatList, Alert } from 'react-native';
-import { Share } from 'react-native';
-import { Audio } from 'expo-av';
-import { downloadTrackToDevice, LocalTrack } from './src/services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  ActivityIndicator,
+  FlatList,
+  Alert,
+} from 'react-native';
+// @ts-ignore: react-native-track-player may not expose type declarations in this repo
+import TrackPlayer from 'react-native-track-player';
+import {
+  searchTracks,
+  downloadTrackToDevice,
+  TrackSearchResult,
+  LocalTrack,
+} from './src/services/api';
+import { getLibrary, addToLibrary } from './src/services/library';
+import { setupPlayer, trackFromLocalTrack } from './src/playback/setupPlayer';
+import MiniPlayer from './src/components/MiniPlayer';
+import NowPlayingScreen from './src/screens/NowPlayingScreen';
 
 export default function App() {
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTrack, setCurrentTrack] = useState<LocalTrack | null>(null);
-  const [tracks, setTracks] = useState<LocalTrack[]>([]);
+  const [searchResults, setSearchResults] = useState<TrackSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [downloadingIndex, setDownloadingIndex] = useState<number | null>(null);
+  const [library, setLibrary] = useState<LocalTrack[]>([]);
+  const [nowPlayingVisible, setNowPlayingVisible] = useState(false);
+  const [playerReady, setPlayerReady] = useState(false);
 
+  // Inicializar TrackPlayer y cargar la biblioteca guardada al abrir la app
   useEffect(() => {
-    return sound ? () => { sound.unloadAsync(); } : undefined;
-  }, [sound]);
+    (async () => {
+      const ok = await setupPlayer();
+      setPlayerReady(ok);
+      const savedLibrary = await getLibrary();
+      setLibrary(savedLibrary);
+    })();
+  }, []);
 
-  const handleSearchAndDownload = async () => {
+  // 1. Buscar las 10 opciones en la API (sin cambios)
+  const handleSearch = async () => {
     if (!query.trim()) return;
 
-    setLoading(true);
+    setSearching(true);
+    setSearchResults([]);
     try {
-      const track = await downloadTrackToDevice(query);
-      setCurrentTrack(track);
-      setTracks((prev) => [track, ...prev]);
-      setQuery('');
-      Alert.alert('¡Éxito!', 'Canción descargada e instalada en el almacenamiento local.');
+      const results = await searchTracks(query);
+      setSearchResults(results);
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Error al obtener el audio.');
+      Alert.alert('Error de Búsqueda', error.message || 'No se pudieron obtener resultados.');
     } finally {
-      setLoading(false);
+      setSearching(false);
     }
   };
 
-  const playAudio = async (track: LocalTrack) => {
-    if (sound) {
-      await sound.unloadAsync();
-    }
-    const { sound: newSound } = await Audio.Sound.createAsync(
-      { uri: track.localUri },
-      { shouldPlay: true }
-    );
-    setSound(newSound);
-    setCurrentTrack(track);
-    setIsPlaying(true);
-
-    newSound.setOnPlaybackStatusUpdate((status) => {
-      if (status.isLoaded && status.didJustFinish) {
-        setIsPlaying(false);
+  // Carga una cola completa en TrackPlayer y arranca en el track elegido
+  const playTrack = useCallback(
+    async (track: LocalTrack, queue: LocalTrack[]) => {
+      if (!playerReady) {
+        Alert.alert('Reproductor no listo', 'Espera un momento e intenta de nuevo.');
+        return;
       }
-    });
-  };
+      await TrackPlayer.reset();
+      await TrackPlayer.add(queue.map(trackFromLocalTrack));
+      const index = queue.findIndex((t) => t.id === track.id);
+      if (index > 0) await TrackPlayer.skip(index);
+      await TrackPlayer.play();
+    },
+    [playerReady]
+  );
 
-  const handleShareOrExport = async (uri: string) => {
+  // 2. Descargar la canción elegida, guardarla en la biblioteca y reproducirla
+  const handleSelectAndDownload = async (item: TrackSearchResult) => {
+    setDownloadingIndex(item.index);
     try {
-      await Share.share({ url: uri });
+      const downloadedTrack = await downloadTrackToDevice(query, item.index, item.title);
+      const updatedLibrary = await addToLibrary(downloadedTrack);
+      setLibrary(updatedLibrary);
+      await playTrack(downloadedTrack, updatedLibrary);
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'No se pudo compartir el archivo.');
+      Alert.alert('Error de Descarga', error.message || 'No se pudo descargar el MP3.');
+    } finally {
+      setDownloadingIndex(null);
     }
   };
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>🎵 VK Music App</Text>
-      <Text style={styles.subtitle}>Guarda música MP3 en tu móvil</Text>
 
+      {/* Formulario de búsqueda */}
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          placeholder="Artista - Canción..."
+          placeholder="Artista o Canción..."
           placeholderTextColor="#888"
           value={query}
           onChangeText={setQuery}
         />
-        <TouchableOpacity style={styles.button} onPress={handleSearchAndDownload} disabled={loading}>
-          <Text style={styles.buttonText}>{loading ? 'Cargando...' : 'Buscar'}</Text>
+        <TouchableOpacity style={styles.button} onPress={handleSearch} disabled={searching}>
+          <Text style={styles.buttonText}>{searching ? '...' : 'Buscar'}</Text>
         </TouchableOpacity>
       </View>
 
-      {loading && <ActivityIndicator size="large" color="#0088cc" style={{ marginVertical: 20 }} />}
+      {searching && <ActivityIndicator size="large" color="#0088cc" style={{ marginVertical: 20 }} />}
 
-      {currentTrack && (
-        <View style={styles.playerCard}>
-          <Text style={styles.trackTitle}>Reproduciendo: {currentTrack.title}</Text>
-          <View style={styles.playerControls}>
-            <TouchableOpacity style={styles.playButton} onPress={() => playAudio(currentTrack)}>
-              <Text style={styles.buttonText}>{isPlaying ? 'Reactivar / Reproducir' : '▶️ Reproducir'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.shareButton} onPress={() => handleShareOrExport(currentTrack.localUri)}>
-              <Text style={styles.buttonText}>📁 Exportar MP3</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+      {/* Resultados de búsqueda */}
+      {searchResults.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Resultados de búsqueda:</Text>
+          <FlatList
+            data={searchResults}
+            keyExtractor={(item) => item.index.toString()}
+            style={{ maxHeight: 220 }}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.resultItem}
+                onPress={() => handleSelectAndDownload(item)}
+                disabled={downloadingIndex !== null}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.resultTitle}>
+                    {item.index}. {item.title}
+                  </Text>
+                  {item.duration ? <Text style={styles.resultDuration}>{item.duration}</Text> : null}
+                </View>
+
+                {downloadingIndex === item.index ? (
+                  <ActivityIndicator size="small" color="#0088cc" />
+                ) : (
+                  <Text style={styles.downloadIcon}>⬇️</Text>
+                )}
+              </TouchableOpacity>
+            )}
+          />
+        </>
       )}
 
-      <Text style={styles.sectionTitle}>Canciones en tu dispositivo:</Text>
+      {/* Biblioteca persistida de canciones ya descargadas */}
+      <Text style={styles.sectionTitle}>Tu biblioteca:</Text>
       <FlatList
-        data={tracks}
+        data={library}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <View style={styles.trackItem}>
-            <Text style={styles.itemText}>🎵 {item.title}</Text>
-            <TouchableOpacity onPress={() => playAudio(item)}>
-              <Text style={styles.playText}>▶️ Escuchar</Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity style={styles.resultItem} onPress={() => playTrack(item, library)}>
+            <Text style={styles.resultTitle} numberOfLines={1}>
+              {item.title}
+            </Text>
+          </TouchableOpacity>
         )}
+        ListEmptyComponent={<Text style={{ color: '#666' }}>Aún no descargaste canciones.</Text>}
       />
+
+      <MiniPlayer onPress={() => setNowPlayingVisible(true)} />
+      <NowPlayingScreen visible={nowPlayingVisible} onClose={() => setNowPlayingVisible(false)} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#121212', padding: 20, paddingTop: 60 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#fff', textAlign: 'center' },
-  subtitle: { fontSize: 14, color: '#aaa', textAlign: 'center', marginBottom: 20 },
-  inputContainer: { flexDirection: 'row', marginBottom: 20 },
+  container: { flex: 1, backgroundColor: '#121212', padding: 20, paddingTop: 60, paddingBottom: 80 },
+  title: { fontSize: 24, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 20 },
+  inputContainer: { flexDirection: 'row', marginBottom: 15 },
   input: { flex: 1, backgroundColor: '#1e1e1e', color: '#fff', padding: 12, borderRadius: 8, marginRight: 10 },
   button: { backgroundColor: '#0088cc', justifyContent: 'center', paddingHorizontal: 20, borderRadius: 8 },
   buttonText: { color: '#fff', fontWeight: 'bold' },
-  playerCard: { backgroundColor: '#1e1e1e', padding: 16, borderRadius: 8, marginBottom: 20 },
-  trackTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
-  playerControls: { flexDirection: 'row', justifyContent: 'space-between' },
-  playButton: { backgroundColor: '#2e7d32', padding: 10, borderRadius: 6, flex: 1, marginRight: 5, alignItems: 'center' },
-  shareButton: { backgroundColor: '#1565c0', padding: 10, borderRadius: 6, flex: 1, marginLeft: 5, alignItems: 'center' },
-  sectionTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginVertical: 10 },
-  trackItem: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#1e1e1e', padding: 12, borderRadius: 6, marginBottom: 8 },
-  itemText: { color: '#fff', flex: 1 },
-  playText: { color: '#4fc3f7', fontWeight: 'bold' }
+  sectionTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginVertical: 10 },
+  resultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e1e1e',
+    padding: 14,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  resultTitle: { color: '#fff', fontSize: 14, fontWeight: '500' },
+  resultDuration: { color: '#888', fontSize: 12, marginTop: 2 },
+  downloadIcon: { fontSize: 18 },
 });

@@ -1,9 +1,9 @@
 import os
 import re
 import asyncio
+import httpx
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pyrogram import Client
 
@@ -12,6 +12,8 @@ app = FastAPI(title="VK Music Downloader API")
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+MY_BOT_USERNAME = os.getenv("MY_BOT_USERNAME", "")
 
 telegram_client = Client(
     "render_vk_session",
@@ -46,16 +48,11 @@ async def shutdown():
 
 
 def parse_bot_search_response(text: str) -> List[dict]:
-    """
-    Parsea el mensaje con formato de lista que devuelve VK Music Bot.
-    Ejemplo de línea: "1. Artist Name - Track Title (03:45)"
-    """
     results = []
     lines = text.split("\n")
 
     for line in lines:
         line = line.strip()
-        # Busca patrones tipo: 1. Artista - Canción (03:15)
         match = re.match(r"^(\d+)[\.\)]\s+(.+?)(?:\s+\((\d+:\d+)\))?$", line)
         if match:
             idx = int(match.group(1))
@@ -72,20 +69,12 @@ def parse_bot_search_response(text: str) -> List[dict]:
 
 @app.get("/search", response_model=List[TrackItem])
 async def search_tracks(q: str = Query(..., description="Nombre de la canción o artista")):
-    """
-    Envía /song <q> al bot de Telegram y devuelve la lista de las 10 opciones encontradas.
-    """
     if not q.strip():
         raise HTTPException(status_code=400, detail="El parámetro de búsqueda no puede estar vacío.")
 
     try:
-        # 1. Limpiar historial del chat
         await telegram_client.read_chat_history(BOT_USERNAME)
-
-        # 2. Enviar comando /song <busqueda>
         await telegram_client.send_message(BOT_USERNAME, q.strip())
-
-        # 3. Esperar la respuesta del bot
         await asyncio.sleep(2.5)
 
         bot_message_text = None
@@ -97,19 +86,12 @@ async def search_tracks(q: str = Query(..., description="Nombre de la canción o
                     break
 
         if not bot_message_text:
-            raise HTTPException(
-                status_code=404,
-                detail="El bot no devolvió ninguna lista de resultados."
-            )
+            raise HTTPException(status_code=404, detail="El bot no devolvió ninguna lista de resultados.")
 
-        # 4. Procesar el texto devuelto por el bot
         tracks = parse_bot_search_response(bot_message_text)
 
         if not tracks:
-            raise HTTPException(
-                status_code=404,
-                detail="No se pudieron extraer canciones de la respuesta del bot."
-            )
+            raise HTTPException(status_code=404, detail="No se pudieron extraer canciones de la respuesta.")
 
         return tracks
 
@@ -118,13 +100,14 @@ async def search_tracks(q: str = Query(..., description="Nombre de la canción o
         raise HTTPException(status_code=500, detail=f"Error al realizar la búsqueda: {str(e)}")
 
 
-@app.get("/download-track")
-async def download_track(
+@app.get("/get-track-url")
+async def get_track_url(
     q: str = Query(..., description="Nombre de la canción original de búsqueda"),
-    index: int = Query(1, ge=1, le=10, description="Índice de la canción seleccionada (1 al 10)")
+    index: int = Query(1, ge=1, le=10, description="Índice de la canción seleccionada")
 ):
     """
-    Selecciona y descarga la canción correspondiente al índice indicado.
+    Obtiene la URL directa de descarga de Telegram para que el dispositivo móvil
+    descargue el MP3 directamente sin consumir ancho de banda en Render.
     """
     if not q.strip():
         raise HTTPException(status_code=400, detail="El parámetro de búsqueda no puede estar vacío.")
@@ -138,8 +121,6 @@ async def download_track(
 
         async for message in telegram_client.get_chat_history(BOT_USERNAME, limit=5):
             if message.from_user and message.from_user.username.lower() == BOT_USERNAME.lower():
-                
-                # Botones inline
                 if message.reply_markup and message.reply_markup.inline_keyboard:
                     btn_idx = min(index - 1, len(message.reply_markup.inline_keyboard) - 1)
                     target_button = message.reply_markup.inline_keyboard[btn_idx][0]
@@ -152,35 +133,50 @@ async def download_track(
                         await asyncio.sleep(3.5)
                         break
 
-                # Comandos de texto (/1, /2, etc.)
                 elif message.text and ("/" in message.text):
                     await telegram_client.send_message(BOT_USERNAME, f"/{index}")
                     await asyncio.sleep(3.5)
                     break
 
-        if not audio_msg:
-            async for message in telegram_client.get_chat_history(BOT_USERNAME, limit=3):
-                if message.audio:
-                    audio_msg = message
-                    break
+        async for message in telegram_client.get_chat_history(BOT_USERNAME, limit=3):
+            if message.audio:
+                audio_msg = message
+                break
 
         if not audio_msg:
-            raise HTTPException(
-                status_code=404,
-                detail="No se encontró el audio o el bot tardó en responder."
-            )
+            raise HTTPException(status_code=404, detail="No se encontró el audio de la canción.")
 
-        file_name = audio_msg.audio.file_name or f"track_{index}.mp3"
-        local_path = os.path.join("/tmp", file_name)
+        # 1. Reenviar audio a tu Bot para registrarlo en Telegram Bot API
+        await telegram_client.forward_messages(MY_BOT_USERNAME, BOT_USERNAME, audio_msg.id)
 
-        downloaded_path = await telegram_client.download_media(audio_msg, file_name=local_path)
+        # 2. Consultar Telegram Bot API para obtener el file_id y la ruta directa
+        async with httpx.AsyncClient() as client:
+            updates_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates")
+            updates_data = updates_res.json()
 
-        return FileResponse(
-            path=downloaded_path,
-            filename=os.path.basename(downloaded_path),
-            media_type="audio/mpeg"
-        )
+            if not updates_data.get("result"):
+                raise HTTPException(status_code=500, detail="No se pudo obtener el mensaje en Telegram Bot API.")
+
+            latest_msg = updates_data["result"][-1]["message"]
+            bot_api_file_id = latest_msg["audio"]["file_id"]
+
+            file_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={bot_api_file_id}")
+            file_data = file_res.json()
+            file_path = file_data["result"]["file_path"]
+
+            # 3. Construir la URL directa HTTP de Telegram
+            direct_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+        display_title = f"{audio_msg.audio.performer or ''} - {audio_msg.audio.title or ''}".strip(" - ")
+        if not display_title:
+            display_title = audio_msg.audio.file_name or f"track_{index}"
+
+        return {
+            "url": direct_url,
+            "title": display_title,
+            "file_name": audio_msg.audio.file_name or f"track_{index}.mp3"
+        }
 
     except Exception as e:
-        print(f"[VK MUSIC DOWNLOAD ERROR]: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al procesar la descarga: {str(e)}")
+        print(f"[VK MUSIC URL ERROR]: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener la URL: {str(e)}")
