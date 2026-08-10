@@ -1,7 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
-// Reemplaza esta constante con la URL real asignada por Render
-export const API_BASE_URL = 'https://prueba-g46s.onrender.com';
+const API_BASE_URL = 'https://prueba-g46s.onrender.com'; // Sustituir por la URL real de Render
 
 export interface TrackSearchResult {
   index: number;
@@ -17,9 +16,6 @@ export interface LocalTrack {
   downloadedAt: Date;
 }
 
-/**
- * 1. Busca las 10 opciones de canciones disponibles en el bot de Telegram.
- */
 export const searchTracks = async (query: string): Promise<TrackSearchResult[]> => {
   const cleanQuery = query.trim();
   if (!cleanQuery) {
@@ -37,9 +33,6 @@ export const searchTracks = async (query: string): Promise<TrackSearchResult[]> 
   return results;
 };
 
-/**
- * 2. Descarga la canción seleccionada por el usuario en el almacenamiento local.
- */
 export const downloadTrackToDevice = async (
   query: string,
   trackIndex: number,
@@ -50,21 +43,31 @@ export const downloadTrackToDevice = async (
     throw new Error('El término de búsqueda no puede estar vacío.');
   }
 
-  const downloadUrl = `${API_BASE_URL}/download-track?q=${encodeURIComponent(cleanQuery)}&index=${trackIndex}`;
+  // A) Solicitar únicamente la URL directa a Render (Uso de ancho de banda en Render: ~1 KB)
+  const urlResponse = await fetch(
+    `${API_BASE_URL}/get-track-url?q=${encodeURIComponent(cleanQuery)}&index=${trackIndex}`
+  );
 
-  // Sanitizar nombre de archivo
-  const displayTitle = trackTitle || cleanQuery;
+  if (!urlResponse.ok) {
+    const errorData = await urlResponse.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Error al obtener el enlace de descarga.');
+  }
+
+  const { url: directAudioUrl, title: fetchedTitle } = await urlResponse.json();
+
+  // B) Preparar el nombre del archivo local
+  const displayTitle = trackTitle || fetchedTitle || cleanQuery;
   const sanitizedName = displayTitle.replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '_');
   const fileName = `${sanitizedName}_${Date.now()}.mp3`;
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
 
   try {
-    const downloadResumable = FileSystem.createDownloadResumable(downloadUrl, fileUri);
+    const downloadResumable = FileSystem.createDownloadResumable(directAudioUrl, fileUri);
     const downloadResult = await downloadResumable.downloadAsync();
 
     if (!downloadResult || downloadResult.status !== 200) {
       await FileSystem.deleteAsync(fileUri, { idempotent: true });
-      throw new Error(`Error en la descarga (Código HTTP ${downloadResult?.status ?? 'desconocido'}).`);
+      throw new Error(`Error en la descarga directa (Código HTTP ${downloadResult?.status ?? 'desconocido'}).`);
     }
 
     return {

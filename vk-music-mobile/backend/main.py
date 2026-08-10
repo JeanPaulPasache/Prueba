@@ -24,8 +24,6 @@ telegram_client = Client(
 )
 
 BOT_USERNAME = "vkmusic_bot"
-
-
 class TrackItem(BaseModel):
     index: int
     title: str
@@ -146,25 +144,49 @@ async def get_track_url(
         if not audio_msg:
             raise HTTPException(status_code=404, detail="No se encontró el audio de la canción.")
 
-        # 1. Reenviar audio a tu Bot para registrarlo en Telegram Bot API
+        # 1. Reenviar audio a tu Bot
         await telegram_client.forward_messages(MY_BOT_USERNAME, BOT_USERNAME, audio_msg.id)
 
-        # 2. Consultar Telegram Bot API para obtener el file_id y la ruta directa
+        bot_api_file_id = None
+        
         async with httpx.AsyncClient() as client:
-            updates_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates")
-            updates_data = updates_res.json()
+            # A) Asegurar que no haya webhooks bloqueando getUpdates
+            await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
 
-            if not updates_data.get("result"):
-                raise HTTPException(status_code=500, detail="No se pudo obtener el mensaje en Telegram Bot API.")
+            # B) Reintentar durante unos segundos buscando el último mensaje reenviado
+            for _ in range(5):
+                await asyncio.sleep(1.5)  # Tiempo para que Telegram registre el mensaje reenviado
+                
+                # offset=-1 le pide a Telegram estrictamente el ÚLTIMO mensaje que llegó al bot
+                updates_res = await client.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
+                )
+                updates_data = updates_res.json()
 
-            latest_msg = updates_data["result"][-1]["message"]
-            bot_api_file_id = latest_msg["audio"]["file_id"]
+                if updates_data.get("ok") and updates_data.get("result"):
+                    last_update = updates_data["result"][-1]
+                    msg = last_update.get("message") or last_update.get("channel_post") or {}
+                    
+                    if "audio" in msg:
+                        bot_api_file_id = msg["audio"]["file_id"]
+                        break
 
-            file_res = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={bot_api_file_id}")
+            if not bot_api_file_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="El mensaje llegó a Telegram pero la Bot API no devolvió el file_id. Intenta nuevamente."
+                )
+
+            # C) Obtener la ruta directa del archivo
+            file_res = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={bot_api_file_id}"
+            )
             file_data = file_res.json()
-            file_path = file_data["result"]["file_path"]
+            
+            if not file_data.get("ok") or "result" not in file_data:
+                raise HTTPException(status_code=500, detail="Error al resolver file_path en Telegram.")
 
-            # 3. Construir la URL directa HTTP de Telegram
+            file_path = file_data["result"]["file_path"]
             direct_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
         display_title = f"{audio_msg.audio.performer or ''} - {audio_msg.audio.title or ''}".strip(" - ")
