@@ -7,7 +7,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from pyrogram import Client
-import google.generativeai as genai
+from google import genai
 import hashlib
 
 app = FastAPI(title="VK Music Downloader API")
@@ -264,11 +264,13 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 
-async def translate_lyrics_with_ai(lrc_text: str) -> str:
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+def translate_lyrics(lyrics_text: str) -> str:
     """Traduce las líneas del formato .LRC manteniendo intactas las marcas de tiempo [mm:ss.xx]."""
     if not GEMINI_API_KEY:
-        return lrc_text
-
+        return lyrics_text
+    
     prompt = f"""
 Eres un traductor de canciones. Traduce el siguiente texto .LRC al español.
 REGLAS:
@@ -277,15 +279,17 @@ REGLAS:
 3. Responde ÚNICAMENTE con el formato LRC traducido, sin explicaciones ni markdown.
 
 Texto LRC:
-{lrc_text}
+{lyrics_text}
 """
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = await model.generate_content_async(prompt)
-        return response.text.strip()
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return response.text
     except Exception as e:
-        print(f"[TRANSLATE ERROR]: {e}")
-        return lrc_text
+        print(f"Error traduciendo con Gemini: {e}")
+        return ""
 
 
 @app.get("/get-lyrics")
