@@ -277,11 +277,13 @@ Texto LRC:
 {lyrics_text}
 """
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
+        response = client.interactions.create(
+            model='gemini-3.6-flash',
+            input=[
+                {"type": "text", "text": prompt}
+            ]
         )
-        return response.text
+        return response.output_text
     except Exception as e:
         print(f"Error traduciendo con Gemini: {e}")
         return ""
