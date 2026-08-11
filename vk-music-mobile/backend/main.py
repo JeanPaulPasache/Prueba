@@ -280,7 +280,7 @@ Texto LRC:
 {lrc_text}
 """
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = await model.generate_content_async(prompt)
         return response.text.strip()
     except Exception as e:
