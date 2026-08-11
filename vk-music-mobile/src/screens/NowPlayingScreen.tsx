@@ -8,6 +8,7 @@ import {
   PanResponder,
   LayoutChangeEvent,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import TrackPlayer, {
   usePlaybackState,
@@ -18,6 +19,11 @@ import TrackPlayer, {
   Track,
 } from 'react-native-track-player';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+if (typeof XMLHttpRequest !== 'undefined' && !XMLHttpRequest.prototype.overrideMimeType) {
+  XMLHttpRequest.prototype.overrideMimeType = function () {};
+}
+const jsmediatags = require('jsmediatags/dist/jsmediatags.min.js');
 
 // 1. IMPORTANTE: Importar el helper del parser, el componente visual y la función de tu api.ts
 import { LyricsViewer } from './LyricsViewer'; // Ajusta la ruta si la tienes en otra carpeta
@@ -53,6 +59,57 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
   const [originalQueue, setOriginalQueue] = useState<Track[]>([]);
 
   const [lastSeekTarget, setLastSeekTarget] = useState<number | null>(null);
+
+  const [artworkUri, setArtworkUri] = useState<string | null>(null);
+  useEffect(() => {
+    if(!activeTrack){
+      setArtworkUri(null);
+      return;
+    }
+    const fileUri = activeTrack.url;
+
+    if (fileUri) {
+      // Usamos fetch() para leer el archivo local file:// como un Blob
+      fetch(fileUri)
+        .then((response) => response.blob())
+        .then((blob) => {
+          // Le pasamos el Blob a jsmediatags en lugar de la URL string
+          jsmediatags.read(blob, {
+            onSuccess: (tag: any) => {
+              const picture = tag.tags.picture;
+              if (picture) {
+                const { data, format } = picture;
+                let binary = '';
+                for (let i = 0; i < data.length; i++) {
+                  binary += String.fromCharCode(data[i]);
+                }
+                const base64 = typeof btoa !== 'undefined'
+                  ? btoa(binary)
+                  : global.btoa ? global.btoa(binary) : null;
+
+                if (base64) {
+                  setArtworkUri(`data:${format};base64,${base64}`);
+                } else {
+                  setArtworkUri(null);
+                }
+              } else {
+                setArtworkUri(null);
+              }
+            },
+            onError: (error: any) => {
+              console.log('Error procesando el Blob con jsmediatags:', error);
+              setArtworkUri(null);
+            },
+          });
+        })
+        .catch((err) => {
+          console.log('Error leyendo el archivo local con fetch:', err);
+          setArtworkUri(null);
+        });
+    } else {
+      setArtworkUri(null);
+    }
+  }, [activeTrack]);
 
   // --- ESTADOS PARA LETRAS Y CACHÉ ---
   const [showLyrics, setShowLyrics] = useState<boolean>(false);
@@ -303,6 +360,12 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
                 showTranslation={showTranslation}
               />
             )
+          ) : artworkUri ? (
+            <Image
+              source={{ uri: artworkUri }}
+              style={styles.artworkImage}
+              resizeMode="cover"
+            />
           ) : (
             <Text style={{ fontSize: 60 }}>🎵</Text>
           )}
@@ -392,6 +455,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
     overflow: 'hidden', // Asegura que las letras no sobresalgan del marco
+  },
+  artworkImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 12,
   },
   title: { color: '#fff', fontSize: 20, fontWeight: 'bold', textAlign: 'center' },
   artist: { color: '#aaa', fontSize: 14, marginTop: 4 },

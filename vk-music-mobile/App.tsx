@@ -17,7 +17,7 @@ import {
   TrackSearchResult,
   LocalTrack,
 } from './src/services/api';
-import { getLibrary, addToLibrary } from './src/services/library';
+import { getLibrary, addToLibrary, deleteTrack } from './src/services/library';
 import { setupPlayer, trackFromLocalTrack } from './src/playback/setupPlayer';
 import MiniPlayer from './src/components/MiniPlayer';
 import NowPlayingScreen from './src/screens/NowPlayingScreen';
@@ -121,6 +121,21 @@ export default function App() {
     }
   };
 
+  const confirmDelete = (track: any) => {
+    Alert.alert(
+      'Eliminar canción',
+      `¿Deseas borrar "${track.title}" de tu dispositivo?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Eliminar',
+          style: 'destructive',
+          onPress: () => deleteTrack(track, library, setLibrary),
+        },
+      ]
+    );
+  };
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>🎵 VK Music App</Text>
@@ -192,15 +207,27 @@ export default function App() {
         renderItem={({ item }) => {
           const isActive = activeTrack?.id === item.id;
           return (
-            <TouchableOpacity
-              style={[styles.resultItem, isActive && styles.resultItemActive]}
-              onPress={() => playTrack(item, library)}
-            >
-              <Text style={styles.resultTitle} numberOfLines={1}>
-                {isActive ? '▶ ' : ''}
-                {item.title}
-              </Text>
-            </TouchableOpacity>
+            <View style={[styles.resultItem, isActive && styles.resultItemActive]}>
+              {/* 1. Área tocable para reproducir la canción */}
+              <TouchableOpacity
+                style={styles.trackInfoContainer}
+                onPress={() => playTrack(item, library)}
+              >
+                <Text style={styles.resultTitle} numberOfLines={1}>
+                  {isActive ? '▶ ' : ''}
+                  {item.title}
+                </Text>
+              </TouchableOpacity>
+
+              {/* 2. Botón independiente para borrar */}
+              <TouchableOpacity
+                style={styles.deleteButton}
+                onPress={() => confirmDelete(item)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Text style={styles.deleteIcon}>🗑️</Text>
+              </TouchableOpacity>
+            </View>
           );
         }}
         ListEmptyComponent={<Text style={styles.emptyLibraryText}>Aún no descargaste canciones.</Text>}
@@ -232,10 +259,9 @@ const styles = StyleSheet.create({
   resultItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1e1e1e',
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 8,
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
   resultItemActive: {
     borderColor: '#0088cc',
@@ -247,4 +273,16 @@ const styles = StyleSheet.create({
   downloadIcon: { fontSize: 18 },
   progressText: { color: '#0088cc', fontSize: 13, fontWeight: 'bold', minWidth: 36, textAlign: 'right' },
   emptyLibraryText: { color: '#666' },
+  trackInfoContainer: {
+    flex: 1, // Toma todo el espacio disponible
+    marginRight: 10, // Separación con el botón de papelera
+  },
+  deleteButton: {
+    padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deleteIcon: {
+    fontSize: 18,
+  },
 });

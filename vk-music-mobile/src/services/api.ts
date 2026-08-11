@@ -103,7 +103,7 @@ export const downloadTrackToDevice = async (
  
     return {
       id: Date.now().toString(),
-      title: displayTitle,
+      title: songTitle,
       artist,
       songTitle,
       fileName,

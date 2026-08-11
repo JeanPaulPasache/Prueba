@@ -38,9 +38,6 @@ export const setupPlayer = async (): Promise<boolean> => {
   }
 };
 
-/**
- * Convierte una LocalTrack (de tu api.ts) al formato Track que espera RNTP.
- */
 export const trackFromLocalTrack = (track: LocalTrack) => ({
   id: track.id,
   url: track.localUri,
