@@ -259,11 +259,6 @@ async def get_track_url(
         print(f"[VK MUSIC URL ERROR]: {e}")
         raise HTTPException(status_code=500, detail=f"Error al obtener la URL: {str(e)}")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 def translate_lyrics(lyrics_text: str) -> str:
