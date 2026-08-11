@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 // @ts-ignore: react-native-track-player may not expose type declarations in this repo
-import TrackPlayer from 'react-native-track-player';
+import TrackPlayer, { useActiveTrack } from 'react-native-track-player';
 import {
   searchTracks,
   downloadTrackToDevice,
@@ -27,33 +27,49 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<TrackSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [downloadingIndex, setDownloadingIndex] = useState<number | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [library, setLibrary] = useState<LocalTrack[]>([]);
   const [nowPlayingVisible, setNowPlayingVisible] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
+  const [playerError, setPlayerError] = useState(false);
+
+  const activeTrack = useActiveTrack();
+
+  // Evita que una búsqueda vieja que responde tarde pise los resultados
+  // de una búsqueda más nueva (condición de carrera).
+  const searchRequestId = useRef(0);
 
   // Inicializar TrackPlayer y cargar la biblioteca guardada al abrir la app
   useEffect(() => {
     (async () => {
       const ok = await setupPlayer();
       setPlayerReady(ok);
+      setPlayerError(!ok);
       const savedLibrary = await getLibrary();
       setLibrary(savedLibrary);
     })();
   }, []);
 
-  // 1. Buscar las 10 opciones en la API (sin cambios)
+  // 1. Buscar las 10 opciones en la API
   const handleSearch = async () => {
     if (!query.trim()) return;
 
+    const requestId = ++searchRequestId.current;
     setSearching(true);
     setSearchResults([]);
     try {
       const results = await searchTracks(query);
-      setSearchResults(results);
+      if (requestId === searchRequestId.current) {
+        setSearchResults(results);
+      }
     } catch (error: any) {
-      Alert.alert('Error de Búsqueda', error.message || 'No se pudieron obtener resultados.');
+      if (requestId === searchRequestId.current) {
+        Alert.alert('Error de Búsqueda', error.message || 'No se pudieron obtener resultados.');
+      }
     } finally {
-      setSearching(false);
+      if (requestId === searchRequestId.current) {
+        setSearching(false);
+      }
     }
   };
 
@@ -73,11 +89,27 @@ export default function App() {
     [playerReady]
   );
 
-  // 2. Descargar la canción elegida, guardarla en la biblioteca y reproducirla
+  // 2. Descargar la canción elegida, guardarla en la biblioteca y reproducirla.
+  //    Si ya existe en la biblioteca (mismo título), la reproduce directo
+  //    en vez de volver a descargarla.
   const handleSelectAndDownload = async (item: TrackSearchResult) => {
+    const alreadyDownloaded = library.find(
+      (t) => t.title.trim().toLowerCase() === item.title.trim().toLowerCase()
+    );
+    if (alreadyDownloaded) {
+      await playTrack(alreadyDownloaded, library);
+      return;
+    }
+
     setDownloadingIndex(item.index);
+    setDownloadProgress(0);
     try {
-      const downloadedTrack = await downloadTrackToDevice(query, item.index, item.title);
+      const downloadedTrack = await downloadTrackToDevice(
+        query,
+        item.index,
+        item.title,
+        setDownloadProgress
+      );
       const updatedLibrary = await addToLibrary(downloadedTrack);
       setLibrary(updatedLibrary);
       await playTrack(downloadedTrack, updatedLibrary);
@@ -85,12 +117,21 @@ export default function App() {
       Alert.alert('Error de Descarga', error.message || 'No se pudo descargar el MP3.');
     } finally {
       setDownloadingIndex(null);
+      setDownloadProgress(0);
     }
   };
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>🎵 VK Music App</Text>
+
+      {playerError && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorBannerText}>
+            No se pudo iniciar el reproductor. Reiniciá la app.
+          </Text>
+        </View>
+      )}
 
       {/* Formulario de búsqueda */}
       <View style={styles.inputContainer}>
@@ -100,6 +141,8 @@ export default function App() {
           placeholderTextColor="#888"
           value={query}
           onChangeText={setQuery}
+          returnKeyType="search"
+          onSubmitEditing={handleSearch}
         />
         <TouchableOpacity style={styles.button} onPress={handleSearch} disabled={searching}>
           <Text style={styles.buttonText}>{searching ? '...' : 'Buscar'}</Text>
@@ -115,7 +158,7 @@ export default function App() {
           <FlatList
             data={searchResults}
             keyExtractor={(item) => item.index.toString()}
-            style={{ maxHeight: 220 }}
+            style={styles.searchResultsList}
             renderItem={({ item }) => (
               <TouchableOpacity
                 style={styles.resultItem}
@@ -130,7 +173,7 @@ export default function App() {
                 </View>
 
                 {downloadingIndex === item.index ? (
-                  <ActivityIndicator size="small" color="#0088cc" />
+                  <Text style={styles.progressText}>{Math.round(downloadProgress * 100)}%</Text>
                 ) : (
                   <Text style={styles.downloadIcon}>⬇️</Text>
                 )}
@@ -145,14 +188,22 @@ export default function App() {
       <FlatList
         data={library}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <TouchableOpacity style={styles.resultItem} onPress={() => playTrack(item, library)}>
-            <Text style={styles.resultTitle} numberOfLines={1}>
-              {item.title}
-            </Text>
-          </TouchableOpacity>
-        )}
-        ListEmptyComponent={<Text style={{ color: '#666' }}>Aún no descargaste canciones.</Text>}
+        style={styles.libraryList}
+        renderItem={({ item }) => {
+          const isActive = activeTrack?.id === item.id;
+          return (
+            <TouchableOpacity
+              style={[styles.resultItem, isActive && styles.resultItemActive]}
+              onPress={() => playTrack(item, library)}
+            >
+              <Text style={styles.resultTitle} numberOfLines={1}>
+                {isActive ? '▶ ' : ''}
+                {item.title}
+              </Text>
+            </TouchableOpacity>
+          );
+        }}
+        ListEmptyComponent={<Text style={styles.emptyLibraryText}>Aún no descargaste canciones.</Text>}
       />
 
       <MiniPlayer onPress={() => setNowPlayingVisible(true)} />
@@ -164,11 +215,20 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#121212', padding: 20, paddingTop: 60, paddingBottom: 80 },
   title: { fontSize: 24, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 20 },
+  errorBanner: {
+    backgroundColor: '#4a1414',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 15,
+  },
+  errorBannerText: { color: '#ff8a8a', fontSize: 13, textAlign: 'center' },
   inputContainer: { flexDirection: 'row', marginBottom: 15 },
   input: { flex: 1, backgroundColor: '#1e1e1e', color: '#fff', padding: 12, borderRadius: 8, marginRight: 10 },
   button: { backgroundColor: '#0088cc', justifyContent: 'center', paddingHorizontal: 20, borderRadius: 8 },
   buttonText: { color: '#fff', fontWeight: 'bold' },
   sectionTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', marginVertical: 10 },
+  searchResultsList: { maxHeight: 220 },
+  libraryList: { flex: 1 },
   resultItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -177,7 +237,14 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 8,
   },
+  resultItemActive: {
+    borderColor: '#0088cc',
+    borderWidth: 1,
+    backgroundColor: '#132a36',
+  },
   resultTitle: { color: '#fff', fontSize: 14, fontWeight: '500' },
   resultDuration: { color: '#888', fontSize: 12, marginTop: 2 },
   downloadIcon: { fontSize: 18 },
+  progressText: { color: '#0088cc', fontSize: 13, fontWeight: 'bold', minWidth: 36, textAlign: 'right' },
+  emptyLibraryText: { color: '#666' },
 });

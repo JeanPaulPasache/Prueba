@@ -7,6 +7,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from pyrogram import Client
+import google.generativeai as genai
 
 app = FastAPI(title="VK Music Downloader API")
 
@@ -256,3 +257,75 @@ async def get_track_url(
     except Exception as e:
         print(f"[VK MUSIC URL ERROR]: {e}")
         raise HTTPException(status_code=500, detail=f"Error al obtener la URL: {str(e)}")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+
+async def translate_lyrics_with_ai(lrc_text: str) -> str:
+    """Traduce las líneas del formato .LRC manteniendo intactas las marcas de tiempo [mm:ss.xx]."""
+    if not GEMINI_API_KEY:
+        return lrc_text
+
+    prompt = f"""
+Eres un traductor de canciones. Traduce el siguiente texto .LRC al español.
+REGLAS:
+1. MANTÉN intactas las marcas de tiempo [mm:ss.xx] al inicio de cada línea.
+2. Si el idioma ya es español, devuelve el texto tal cual.
+3. Responde ÚNICAMENTE con el formato LRC traducido, sin explicaciones ni markdown.
+
+Texto LRC:
+{lrc_text}
+"""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = await model.generate_content_async(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"[TRANSLATE ERROR]: {e}")
+        return lrc_text
+
+
+@app.get("/get-lyrics")
+async def get_lyrics(
+    track_name: str = Query(..., description="Nombre del tema"),
+    artist_name: str = Query("", description="Nombre del artista"),
+    duration: int = Query(0, description="Duración en segundos"),
+    translate: bool = Query(False, description="Traducir al español")
+):
+    url = "https://lrclib.net/api/get"
+    params = {
+        "track_name": track_name,
+        "artist_name": artist_name,
+        "duration": duration
+    }
+
+    lyrics_data = None
+    async with httpx.AsyncClient() as client:
+        res = await client.get(url, params=params)
+        if res.status_code == 200:
+            lyrics_data = res.json()
+        else:
+            # Fallback: Búsqueda abierta si la coincidencia exacta falla
+            search_res = await client.get(
+                "https://lrclib.net/api/search",
+                params={"q": f"{track_name} {artist_name}".strip()}
+            )
+            if search_res.status_code == 200 and search_res.json():
+                lyrics_data = search_res.json()[0]
+
+    if not lyrics_data:
+        raise HTTPException(status_code=404, detail="No se encontraron letras para esta canción.")
+
+    synced_lyrics = lyrics_data.get("syncedLyrics")
+    translated_lyrics = None
+
+    if synced_lyrics and translate:
+        translated_lyrics = await translate_lyrics_with_ai(synced_lyrics)
+
+    return {
+        "syncedLyrics": synced_lyrics,
+        "translatedLyrics": translated_lyrics,
+        "plainLyrics": lyrics_data.get("plainLyrics")
+    }

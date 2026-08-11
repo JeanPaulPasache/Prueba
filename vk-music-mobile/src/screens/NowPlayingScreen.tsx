@@ -1,9 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  RepeatMode,
-  Track,
-} from 'react-native-track-player';
-import {
   Modal,
   View,
   Text,
@@ -17,11 +13,23 @@ import TrackPlayer, {
   useProgress,
   useActiveTrack,
   State,
+  RepeatMode,
+  Track,
 } from 'react-native-track-player';
 
 interface Props {
   visible: boolean;
   onClose: () => void;
+}
+
+// Fisher-Yates: shuffle uniforme, a diferencia de sort(() => Math.random() - 0.5)
+function shuffleArray<T>(arr: T[]): T[] {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 }
 
 export default function NowPlayingScreen({ visible, onClose }: Props) {
@@ -39,6 +47,34 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
 
   const [lastSeekTarget, setLastSeekTarget] = useState<number | null>(null);
 
+  // Referencia al timeout de seguridad para poder cancelarlo si arranca
+  // un nuevo gesto o si el componente se desmonta con uno pendiente.
+  const safetyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearSafetyTimeout = () => {
+    if (safetyTimeoutRef.current) {
+      clearTimeout(safetyTimeoutRef.current);
+      safetyTimeoutRef.current = null;
+    }
+  };
+
+  // Sincronizamos el estado local con el estado real del player al montar,
+  // para que la UI no mienta si repeat/shuffle ya estaban activados.
+  useEffect(() => {
+    (async () => {
+      try {
+        const currentRepeatMode = await TrackPlayer.getRepeatMode();
+        setRepeatMode(currentRepeatMode);
+      } catch (err) {
+        console.log('Error leyendo repeat mode inicial:', err);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    return () => clearSafetyTimeout();
+  }, []);
+
   useEffect(() => {
     if (lastSeekTarget !== null) {
       const diff = Math.abs(progress.position - lastSeekTarget);
@@ -49,11 +85,24 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
     }
   }, [progress.position, lastSeekTarget]);
 
+  const durationRef = useRef(progress.duration);
+  durationRef.current = progress.duration;
+
+  const sliderWidthRef = useRef(sliderWidth);
+  sliderWidthRef.current = sliderWidth;
+
+  const handleCalculateSeek = (locationX: number) => {
+    if (sliderWidthRef.current <= 0) return 0;
+    const ratio = Math.max(0, Math.min(locationX / sliderWidthRef.current, 1));
+    return ratio * durationRef.current;
+  };
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt) => {
+        clearSafetyTimeout();
         setIsDragging(true);
         const newPos = handleCalculateSeek(evt.nativeEvent.locationX);
         setDragPosition(newPos);
@@ -74,12 +123,15 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
         }
 
         // Timer de seguridad por si el audio falla o tarda demasiado
-        setTimeout(() => {
+        clearSafetyTimeout();
+        safetyTimeoutRef.current = setTimeout(() => {
           setLastSeekTarget(null);
           setIsDragging(false);
+          safetyTimeoutRef.current = null;
         }, 1500);
       },
       onPanResponderTerminate: () => {
+        clearSafetyTimeout();
         setIsDragging(false);
         setLastSeekTarget(null);
       },
@@ -106,39 +158,27 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
       setOriginalQueue(currentQueue);
 
       if (activeIndex !== undefined && currentQueue.length > 0) {
-        const currentTrack = currentQueue[activeIndex];
+        const currentQueueTrack = currentQueue[activeIndex];
         const otherTracks = currentQueue.filter((_, idx) => idx !== activeIndex);
-        
+
         // Mezclar las canciones restantes sin interrumpir la actual
-        const shuffled = [...otherTracks].sort(() => Math.random() - 0.5);
-        await TrackPlayer.setQueue([currentTrack, ...shuffled]);
+        const shuffled = shuffleArray(otherTracks);
+        await TrackPlayer.setQueue([currentQueueTrack, ...shuffled]);
       }
       setIsShuffle(true);
     } else {
       // Restaurar el orden original
       if (originalQueue.length > 0) {
-        const activeTrack = await TrackPlayer.getActiveTrack();
+        const currentActiveTrack = await TrackPlayer.getActiveTrack();
         await TrackPlayer.setQueue(originalQueue);
-        
-        if (activeTrack) {
-          const newIndex = originalQueue.findIndex((t) => t.id === activeTrack.id);
+
+        if (currentActiveTrack) {
+          const newIndex = originalQueue.findIndex((t) => t.id === currentActiveTrack.id);
           if (newIndex !== -1) await TrackPlayer.skip(newIndex);
         }
       }
       setIsShuffle(false);
     }
-  };
-
-  const durationRef = useRef(progress.duration);
-  durationRef.current = progress.duration;
-
-  const sliderWidthRef = useRef(sliderWidth);
-  sliderWidthRef.current = sliderWidth;
-
-  const handleCalculateSeek = (locationX: number) => {
-    if (sliderWidthRef.current <= 0) return 0;
-    const ratio = Math.max(0, Math.min(locationX / sliderWidthRef.current, 1));
-    return ratio * durationRef.current;
   };
 
   const isPlaying = playbackState.state === State.Playing;
@@ -220,6 +260,10 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
               {getRepeatIcon()}
             </Text>
           </TouchableOpacity>
+
+          <TouchableOpacity onPress={toggleShuffle}>
+            <Text style={[styles.secondaryIcon, isShuffle && styles.activeIcon]}>🔀</Text>
+          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -275,8 +319,3 @@ const styles = StyleSheet.create({
   secondaryIcon: { fontSize: 22, opacity: 0.3 },
   playButton: { marginHorizontal: 20 },
 });
-
-
-
-
-
