@@ -263,7 +263,7 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 def translate_lyrics(lyrics_text: str) -> str:
     """Traduce las líneas del formato .LRC manteniendo intactas las marcas de tiempo [mm:ss.xx]."""
-    if not GEMINI_API_KEY:
+    if not client:
         return lyrics_text
     
     prompt = f"""
