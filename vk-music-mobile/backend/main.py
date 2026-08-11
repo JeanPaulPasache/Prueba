@@ -342,7 +342,7 @@ async def get_lyrics(
         translation_key = hashlib.sha1(synced_lyrics.encode("utf-8")).hexdigest()
         
         try:
-            translated_lyrics = await translate_lyrics_with_ai(synced_lyrics)
+            translated_lyrics = await translate_lyrics(synced_lyrics)
         except Exception as e:
             print(f"[LYRICS TRANSLATE ERROR]: {e}")
             translated_lyrics = None
