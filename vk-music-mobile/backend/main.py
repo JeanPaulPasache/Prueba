@@ -1,9 +1,10 @@
 import os
 import re
 import asyncio
+import secrets
 import httpx
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from pyrogram import Client
 
@@ -15,6 +16,13 @@ SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 MY_BOT_USERNAME = os.getenv("MY_BOT_USERNAME", "")
 
+# Render inyecta esta variable automáticamente en servicios web.
+# Si no existe, cae a WEBHOOK_URL manual (debe ser https y público).
+PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL", "")
+WEBHOOK_PATH = "/telegram-webhook"
+# Token secreto para validar que el webhook realmente viene de Telegram.
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET") or secrets.token_urlsafe(32)
+
 telegram_client = Client(
     "render_vk_session",
     api_id=API_ID,
@@ -24,6 +32,14 @@ telegram_client = Client(
 )
 
 BOT_USERNAME = "vkmusic_bot"
+
+# file_unique_id -> asyncio.Future que se resuelve cuando el webhook recibe
+# ese mismo archivo desde la Bot API. file_unique_id es idéntico entre
+# Pyrogram (MTProto) y la Bot API, así que sirve como clave de correlación
+# segura incluso con varias descargas en paralelo.
+pending_files: dict[str, "asyncio.Future[dict]"] = {}
+
+
 class TrackItem(BaseModel):
     index: int
     title: str
@@ -38,11 +54,50 @@ async def startup():
         await telegram_client.start()
         print("[TELEGRAM]: Cliente conectado exitosamente en Render.")
 
+    if BOT_TOKEN and PUBLIC_URL:
+        webhook_url = f"{PUBLIC_URL.rstrip('/')}{WEBHOOK_PATH}"
+        async with httpx.AsyncClient() as client:
+            res = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                params={
+                    "url": webhook_url,
+                    "secret_token": WEBHOOK_SECRET,
+                    "drop_pending_updates": "true",
+                    "allowed_updates": '["message","channel_post"]',
+                },
+            )
+            print(f"[TELEGRAM WEBHOOK]: {res.json()}")
+    else:
+        print("[WARNING]: BOT_TOKEN o PUBLIC_URL no configurados; el webhook no se registró.")
+
 
 @app.on_event("shutdown")
 async def shutdown():
     if telegram_client.is_connected:
         await telegram_client.stop()
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    """
+    Telegram empuja acá cada update de MY_BOT_USERNAME. Cuando llega un
+    audio/documento cuyo file_unique_id coincide con una descarga que
+    estamos esperando, resolvemos su Future con el file_id de la Bot API.
+    """
+    secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if secret_header != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Token de webhook inválido.")
+
+    update = await request.json()
+    msg = update.get("message") or update.get("channel_post") or {}
+    media_obj = msg.get("audio") or msg.get("document")
+
+    if media_obj and "file_unique_id" in media_obj:
+        fut = pending_files.get(media_obj["file_unique_id"])
+        if fut and not fut.done():
+            fut.set_result(media_obj)
+
+    return {"ok": True}
 
 
 def parse_bot_search_response(text: str) -> List[dict]:
@@ -110,12 +165,16 @@ async def get_track_url(
     if not q.strip():
         raise HTTPException(status_code=400, detail="El parámetro de búsqueda no puede estar vacío.")
 
+    if not BOT_TOKEN or not PUBLIC_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="Falta configurar TELEGRAM_BOT_TOKEN o RENDER_EXTERNAL_URL/WEBHOOK_URL para el webhook."
+        )
+
     try:
         await telegram_client.read_chat_history(BOT_USERNAME)
         await telegram_client.send_message(BOT_USERNAME, f"/song {q.strip()}")
         await asyncio.sleep(2.5)
-
-        audio_msg = None
 
         async for message in telegram_client.get_chat_history(BOT_USERNAME, limit=5):
             if message.from_user and message.from_user.username.lower() == BOT_USERNAME.lower():
@@ -136,6 +195,7 @@ async def get_track_url(
                     await asyncio.sleep(3.5)
                     break
 
+        audio_msg = None
         async for message in telegram_client.get_chat_history(BOT_USERNAME, limit=3):
             if message.audio:
                 audio_msg = message
@@ -144,55 +204,37 @@ async def get_track_url(
         if not audio_msg:
             raise HTTPException(status_code=404, detail="No se encontró el audio de la canción.")
 
-        # 1. Reenviar audio a tu Bot
-        await telegram_client.forward_messages(MY_BOT_USERNAME, BOT_USERNAME, audio_msg.id)
+        # Registramos un Future ANTES de reenviar, para no perder el update
+        # si llega muy rápido (evita la condición de carrera).
+        file_unique_id = audio_msg.audio.file_unique_id
+        loop = asyncio.get_event_loop()
+        fut: "asyncio.Future[dict]" = loop.create_future()
+        pending_files[file_unique_id] = fut
 
-        bot_api_file_id = None
-        
-        async with httpx.AsyncClient() as client:
-            # A) Asegurar que no haya webhooks activos
-            await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
+        try:
+            # Reenviar audio a tu Bot
+            await telegram_client.forward_messages(MY_BOT_USERNAME, BOT_USERNAME, audio_msg.id)
 
-            # B) Buscar el archivo en los mensajes recibidos
-            for attempt in range(5):
-                await asyncio.sleep(1.5)
-                
-                # Obtenemos las actualizaciones sin limitar con offset=-1
-                updates_res = await client.get(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-                )
-                updates_data = updates_res.json()
-
-                # Print para inspeccionar en la consola de Render si vuelve a fallar
-                print(f"[DEBUG BOT API Intento {attempt + 1}]: {updates_data}")
-
-                if updates_data.get("ok") and updates_data.get("result"):
-                    # Recorremos de las actualizaciones más recientes a las más antiguas
-                    for update in reversed(updates_data["result"]):
-                        msg = update.get("message") or update.get("channel_post") or {}
-                        
-                        # 🔑 Importante: Telegram puede enviarlo como 'audio' o como 'document'
-                        media_obj = msg.get("audio") or msg.get("document")
-                        
-                        if media_obj and "file_id" in media_obj:
-                            bot_api_file_id = media_obj["file_id"]
-                            break
-
-                if bot_api_file_id:
-                    break
-
-            if not bot_api_file_id:
+            try:
+                media_obj = await asyncio.wait_for(fut, timeout=15)
+            except asyncio.TimeoutError:
                 raise HTTPException(
-                    status_code=500,
-                    detail="El mensaje llegó a Telegram pero la Bot API no devolvió el file_id. Revisa la consola de Render para ver el Log de DEBUG."
+                    status_code=504,
+                    detail="Timeout esperando el webhook de Telegram. Verifica que el webhook esté "
+                           "registrado correctamente (revisa el log [TELEGRAM WEBHOOK] al iniciar)."
                 )
+        finally:
+            pending_files.pop(file_unique_id, None)
 
-            # C) Obtener la ruta del archivo con getFile
+        bot_api_file_id = media_obj["file_id"]
+
+        async with httpx.AsyncClient() as client:
             file_res = await client.get(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={bot_api_file_id}"
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": bot_api_file_id}
             )
             file_data = file_res.json()
-            
+
             if not file_data.get("ok") or "result" not in file_data:
                 raise HTTPException(status_code=500, detail="Error al resolver file_path en Telegram.")
 
@@ -209,6 +251,8 @@ async def get_track_url(
             "file_name": audio_msg.audio.file_name or f"track_{index}.mp3"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[VK MUSIC URL ERROR]: {e}")
         raise HTTPException(status_code=500, detail=f"Error al obtener la URL: {str(e)}")
