@@ -45,5 +45,8 @@ export const trackFromLocalTrack = (track: LocalTrack) => ({
   id: track.id,
   url: track.localUri,
   title: track.title,
-  artist: 'VK Music',
+  artist: track.artist,
+  artwork: track.localUri,
+  duration: track.downloadedAt.getTime(),
+  album: track.fileName,
 });

@@ -7,6 +7,7 @@ import {
   StyleSheet,
   PanResponder,
   LayoutChangeEvent,
+  ActivityIndicator,
 } from 'react-native';
 import TrackPlayer, {
   usePlaybackState,
@@ -16,13 +17,19 @@ import TrackPlayer, {
   RepeatMode,
   Track,
 } from 'react-native-track-player';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// 1. IMPORTANTE: Importar el helper del parser, el componente visual y la función de tu api.ts
+import { LyricsViewer } from './LyricsViewer'; // Ajusta la ruta si la tienes en otra carpeta
+import { parseLrcWithTranslation, LyricLine } from '../utils/parseLrc';
+import { fetchLyricsApi } from '../services/api'; // Reemplaza por la ruta de tu api.ts
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
 
-// Fisher-Yates: shuffle uniforme, a diferencia de sort(() => Math.random() - 0.5)
+// Fisher-Yates: shuffle uniforme
 function shuffleArray<T>(arr: T[]): T[] {
   const result = [...arr];
   for (let i = result.length - 1; i > 0; i--) {
@@ -47,8 +54,13 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
 
   const [lastSeekTarget, setLastSeekTarget] = useState<number | null>(null);
 
-  // Referencia al timeout de seguridad para poder cancelarlo si arranca
-  // un nuevo gesto o si el componente se desmonta con uno pendiente.
+  // --- ESTADOS PARA LETRAS Y CACHÉ ---
+  const [showLyrics, setShowLyrics] = useState<boolean>(false);
+  const [lyrics, setLyrics] = useState<LyricLine[]>([]);
+  const [loadingLyrics, setLoadingLyrics] = useState<boolean>(false);
+  const [showTranslation, setShowTranslation] = useState<boolean>(true);
+
+  // Referencia al timeout de seguridad para la barra de progreso
   const safetyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSafetyTimeout = () => {
@@ -58,8 +70,13 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
     }
   };
 
-  // Sincronizamos el estado local con el estado real del player al montar,
-  // para que la UI no mienta si repeat/shuffle ya estaban activados.
+  // 2. Limpiar/Resetear el estado de las letras cuando cambie la canción activa
+  useEffect(() => {
+    setLyrics([]);
+    setShowLyrics(false);
+  }, [activeTrack?.id, activeTrack?.title]);
+
+  // Sincronizamos el estado local con el estado real del player al montar
   useEffect(() => {
     (async () => {
       try {
@@ -114,7 +131,7 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
       onPanResponderRelease: async (evt) => {
         const finalPos = handleCalculateSeek(evt.nativeEvent.locationX);
         setDragPosition(finalPos);
-        setLastSeekTarget(finalPos); // Activamos el candado con la posición final
+        setLastSeekTarget(finalPos);
 
         try {
           await TrackPlayer.seekTo(Math.floor(finalPos));
@@ -122,7 +139,6 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
           console.log('Error ejecutando seekTo:', err);
         }
 
-        // Timer de seguridad por si el audio falla o tarda demasiado
         clearSafetyTimeout();
         safetyTimeoutRef.current = setTimeout(() => {
           setLastSeekTarget(null);
@@ -137,6 +153,69 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
       },
     })
   ).current;
+
+  // --- LÓGICA DE LETRAS CON CACHÉ (ASYNCSTORAGE) ---
+  const handleToggleLyrics = async () => {
+    // Si ya se están mostrando, simplemente ocultar
+    if (showLyrics) {
+      setShowLyrics(false);
+      return;
+    }
+
+    setShowLyrics(true);
+
+    if (!activeTrack?.title) return;
+
+    // Si ya tenemos letras cargadas previamente en memoria para esta canción, no volvemos a consultar
+    if (lyrics.length > 0) return;
+
+    setLoadingLyrics(true);
+    const cacheKey = `lyrics_${activeTrack.id || `${activeTrack.title}_${activeTrack.artist}`}`;
+
+    try {
+      // 1. Buscar en almacenamiento local primero (AsyncStorage)
+      const cachedData = await AsyncStorage.getItem(cacheKey);
+
+      if (cachedData) {
+        console.log('Letras cargadas desde la memoria local');
+        const { syncedLyrics, translatedLyrics } = JSON.parse(cachedData);
+        const parsed = parseLrcWithTranslation(syncedLyrics, translatedLyrics);
+        setLyrics(parsed);
+        setLoadingLyrics(false);
+        return;
+      }
+
+      // 2. Si no está en caché local, pedir a la API
+      console.log('Consultando letras al backend...');
+      const data = await fetchLyricsApi(
+        activeTrack.title,
+        activeTrack.artist || '',
+        Math.floor(progress.duration || 0),
+        true // Solicitar traducción
+      );
+
+      if (data && data.syncedLyrics) {
+        // 3. Guardar en AsyncStorage para uso futuro u offline
+        await AsyncStorage.setItem(
+          cacheKey,
+          JSON.stringify({
+            syncedLyrics: data.syncedLyrics,
+            translatedLyrics: data.translatedLyrics,
+          })
+        );
+
+        const parsed = parseLrcWithTranslation(data.syncedLyrics, data.translatedLyrics);
+        setLyrics(parsed);
+      } else {
+        setLyrics([]);
+      }
+    } catch (error) {
+      console.log('Error obteniendo letras:', error);
+      setLyrics([]);
+    } finally {
+      setLoadingLyrics(false);
+    }
+  };
 
   // --- LÓGICA DE REPEAT ---
   const toggleRepeatMode = async () => {
@@ -154,20 +233,17 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
     const activeIndex = await TrackPlayer.getActiveTrackIndex();
 
     if (!isShuffle) {
-      // Guardar cola original para poder restaurarla al desactivar Shuffle
       setOriginalQueue(currentQueue);
 
       if (activeIndex !== undefined && currentQueue.length > 0) {
         const currentQueueTrack = currentQueue[activeIndex];
         const otherTracks = currentQueue.filter((_, idx) => idx !== activeIndex);
 
-        // Mezclar las canciones restantes sin interrumpir la actual
         const shuffled = shuffleArray(otherTracks);
         await TrackPlayer.setQueue([currentQueueTrack, ...shuffled]);
       }
       setIsShuffle(true);
     } else {
-      // Restaurar el orden original
       if (originalQueue.length > 0) {
         const currentActiveTrack = await TrackPlayer.getActiveTrack();
         await TrackPlayer.setQueue(originalQueue);
@@ -215,8 +291,21 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
           <Text style={styles.closeText}>⌄ Cerrar</Text>
         </TouchableOpacity>
 
+        {/* --- ÁREA CENTRAL: CARÁTULA O LETRAS --- */}
         <View style={styles.artworkPlaceholder}>
-          <Text style={{ fontSize: 60 }}>🎵</Text>
+          {showLyrics ? (
+            loadingLyrics ? (
+              <ActivityIndicator size="large" color="#0088cc" />
+            ) : (
+              <LyricsViewer
+                lyrics={lyrics}
+                currentTimeSeconds={progress.position}
+                showTranslation={showTranslation}
+              />
+            )
+          ) : (
+            <Text style={{ fontSize: 60 }}>🎵</Text>
+          )}
         </View>
 
         <Text style={styles.title} numberOfLines={2}>
@@ -224,13 +313,33 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
         </Text>
         <Text style={styles.artist}>{activeTrack?.artist ?? ''}</Text>
 
+        {/* --- BARRA DE ACCIÓN (LETRA / TRADUCCIÓN) --- */}
+        <View style={styles.lyricsActionRow}>
+          <TouchableOpacity
+            style={[styles.lyricsButton, showLyrics && styles.activeLyricsButton]}
+            onPress={handleToggleLyrics}
+          >
+            <Text style={styles.lyricsButtonText}>
+              {showLyrics ? '🖼️ Carátula' : '🎤 Cargar Letras'}
+            </Text>
+          </TouchableOpacity>
+
+          {showLyrics && lyrics.length > 0 && (
+            <TouchableOpacity
+              style={[styles.lyricsButton, showTranslation && styles.activeLyricsButton]}
+              onPress={() => setShowTranslation(!showTranslation)}
+            >
+              <Text style={styles.lyricsButtonText}>🌐 Traducir</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
         {/* --- ÁREA TÁCTIL DEL SLIDER --- */}
         <View
           style={styles.sliderTouchArea}
           onLayout={(e: LayoutChangeEvent) => setSliderWidth(e.nativeEvent.layout.width)}
           {...panResponder.panHandlers}
         >
-          {/* pointerEvents="none" evita que toques internos descalibren las coordenadas X */}
           <View style={styles.trackBackground} pointerEvents="none">
             <View style={[styles.trackFill, { width: `${percentage}%` }]} />
             <View style={[styles.thumb, { left: `${percentage}%` }]} />
@@ -272,24 +381,45 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#121212', padding: 24, paddingTop: 60, alignItems: 'center' },
-  closeButton: { alignSelf: 'flex-start', marginBottom: 30 },
+  closeButton: { alignSelf: 'flex-start', marginBottom: 20 },
   closeText: { color: '#aaa', fontSize: 14 },
   artworkPlaceholder: {
-    width: 220,
-    height: 220,
+    width: 260,
+    height: 260,
     borderRadius: 12,
     backgroundColor: '#1e1e1e',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 30,
+    marginBottom: 20,
+    overflow: 'hidden', // Asegura que las letras no sobresalgan del marco
   },
   title: { color: '#fff', fontSize: 20, fontWeight: 'bold', textAlign: 'center' },
   artist: { color: '#aaa', fontSize: 14, marginTop: 4 },
+  lyricsActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  lyricsButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    backgroundColor: '#262626',
+  },
+  activeLyricsButton: {
+    backgroundColor: '#0088cc',
+  },
+  lyricsButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
   sliderTouchArea: {
     width: '100%',
     height: 40,
     justifyContent: 'center',
-    marginTop: 20,
+    marginTop: 10,
   },
   trackBackground: {
     width: '100%',
@@ -313,7 +443,7 @@ const styles = StyleSheet.create({
   },
   timeRow: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
   timeText: { color: '#aaa', fontSize: 12 },
-  controls: { flexDirection: 'row', alignItems: 'center', marginTop: 40, gap: 30 },
+  controls: { flexDirection: 'row', alignItems: 'center', marginTop: 25, gap: 30 },
   controlIcon: { fontSize: 32, color: '#fff' },
   activeIcon: { opacity: 1 },
   secondaryIcon: { fontSize: 22, opacity: 0.3 },

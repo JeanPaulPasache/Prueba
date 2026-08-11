@@ -1,16 +1,20 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { parseTrackTitle } from './parseTrackFile'; 
 
 const API_BASE_URL = 'https://prueba-g46s.onrender.com';
-
 export interface TrackSearchResult {
   index: number;
   title: string;
   duration: string;
 }
-
+ 
 export interface LocalTrack {
   id: string;
   title: string;
+  /** Artista parseado del título crudo, '' si no se pudo separar. */
+  artist: string;
+  /** Título limpio (sin artista ni ruido tipo "(Official Video)"), usado para buscar letras. */
+  songTitle: string;
   fileName: string;
   localUri: string;
   downloadedAt: Date;
@@ -53,25 +57,25 @@ export const downloadTrackToDevice = async (
   if (!cleanQuery) {
     throw new Error('El término de búsqueda no puede estar vacío.');
   }
-
+ 
   // A) Solicitar únicamente la URL directa a Render (Uso de ancho de banda en Render: ~1 KB)
   const urlResponse = await fetch(
     `${API_BASE_URL}/get-track-url?q=${encodeURIComponent(cleanQuery)}&index=${trackIndex}`
   );
-
+ 
   if (!urlResponse.ok) {
     const errorData = await urlResponse.json().catch(() => ({}));
     throw new Error(errorData.detail || 'Error al obtener el enlace de descarga.');
   }
-
+ 
   const { url: directAudioUrl, title: fetchedTitle } = await urlResponse.json();
-
+ 
   // B) Preparar el nombre del archivo local
   const displayTitle = trackTitle || fetchedTitle || cleanQuery;
   const sanitizedName = sanitizeFileName(displayTitle) || `track_${trackIndex}`;
   const fileName = `${sanitizedName}_${Date.now()}.mp3`;
   const fileUri = `${FileSystem.documentDirectory}${fileName}`;
-
+ 
   try {
     const downloadResumable = FileSystem.createDownloadResumable(
       directAudioUrl,
@@ -87,17 +91,21 @@ export const downloadTrackToDevice = async (
           }
         : undefined
     );
-
+ 
     const downloadResult = await downloadResumable.downloadAsync();
-
+ 
     if (!downloadResult || downloadResult.status !== 200) {
       await FileSystem.deleteAsync(fileUri, { idempotent: true });
       throw new Error(`Error en la descarga directa (Código HTTP ${downloadResult?.status ?? 'desconocido'}).`);
     }
-
+ 
+    const { artist, title: songTitle } = parseTrackTitle(displayTitle);
+ 
     return {
       id: Date.now().toString(),
       title: displayTitle,
+      artist,
+      songTitle,
       fileName,
       localUri: downloadResult.uri,
       downloadedAt: new Date(),
@@ -109,6 +117,7 @@ export const downloadTrackToDevice = async (
     throw new Error(error.message || 'Error al descargar la canción.');
   }
 };
+ 
 
 export const fetchLyricsApi = async (
   trackName: string,

@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from pyrogram import Client
 import google.generativeai as genai
+import hashlib
 
 app = FastAPI(title="VK Music Downloader API")
 
@@ -302,30 +303,57 @@ async def get_lyrics(
     }
 
     lyrics_data = None
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url, params=params)
-        if res.status_code == 200:
-            lyrics_data = res.json()
-        else:
-            # Fallback: Búsqueda abierta si la coincidencia exacta falla
-            search_res = await client.get(
-                "https://lrclib.net/api/search",
-                params={"q": f"{track_name} {artist_name}".strip()}
-            )
-            if search_res.status_code == 200 and search_res.json():
-                lyrics_data = search_res.json()[0]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(url, params=params)
+
+            if res.status_code == 200:
+                lyrics_data = res.json()
+            else:
+                # Fallback: búsqueda abierta si la coincidencia exacta falla
+                search_res = await client.get(
+                    "https://lrclib.net/api/search",
+                    params={"q": f"{track_name} {artist_name}".strip()}
+                )
+                if search_res.status_code == 200:
+                    results = search_res.json()
+                    if results:
+                        # Preferimos el resultado cuya duración esté más
+                        # cerca de la real, en vez del primero a ciegas
+                        # (puede haber varias versiones: radio edit, live, remix...)
+                        if duration:
+                            results.sort(
+                                key=lambda r: abs((r.get("duration") or 0) - duration)
+                            )
+                        lyrics_data = results[0]
+    except httpx.RequestError as e:
+        print(f"[LYRICS ERROR] No se pudo contactar LRCLIB: {e}")
+        raise HTTPException(status_code=502, detail="No se pudo contactar al servicio de letras.")
 
     if not lyrics_data:
         raise HTTPException(status_code=404, detail="No se encontraron letras para esta canción.")
-
+ 
     synced_lyrics = lyrics_data.get("syncedLyrics")
     translated_lyrics = None
-
+ 
     if synced_lyrics and translate:
-        translated_lyrics = await translate_lyrics_with_ai(synced_lyrics)
-
+        # La traducción depende del CONTENIDO de la letra, no de la query
+        # original, así que se cachea por hash del texto: sirve incluso si
+        # dos búsquedas distintas terminan resolviendo a la misma canción.
+        translation_key = hashlib.sha1(synced_lyrics.encode("utf-8")).hexdigest()
+        
+        try:
+            translated_lyrics = await translate_lyrics_with_ai(synced_lyrics)
+        except Exception as e:
+            print(f"[LYRICS TRANSLATE ERROR]: {e}")
+            translated_lyrics = None
+ 
     return {
         "syncedLyrics": synced_lyrics,
         "translatedLyrics": translated_lyrics,
-        "plainLyrics": lyrics_data.get("plainLyrics")
+        "plainLyrics": lyrics_data.get("plainLyrics"),
+        # Para que la app pueda avisar si el match parece de otra versión
+        # de la canción (por ejemplo si la diferencia de duración es grande).
+        "matchedDuration": lyrics_data.get("duration"),
     }
+ 
