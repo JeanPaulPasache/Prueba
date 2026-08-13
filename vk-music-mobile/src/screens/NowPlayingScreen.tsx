@@ -19,16 +19,16 @@ import TrackPlayer, {
   Track,
 } from 'react-native-track-player';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Feather } from '@expo/vector-icons';
 
 if (typeof XMLHttpRequest !== 'undefined' && !XMLHttpRequest.prototype.overrideMimeType) {
   XMLHttpRequest.prototype.overrideMimeType = function () {};
 }
 const jsmediatags = require('jsmediatags/dist/jsmediatags.min.js');
-
-// 1. IMPORTANTE: Importar el helper del parser, el componente visual y la función de tu api.ts
-import { LyricsViewer } from './LyricsViewer'; // Ajusta la ruta si la tienes en otra carpeta
+import { LyricsViewer } from './LyricsViewer';
 import { parseLrcWithTranslation, LyricLine } from '../utils/parseLrc';
-import { fetchLyricsApi } from '../services/api'; // Reemplaza por la ruta de tu api.ts
+import { fetchLyricsApi } from '../services/api';
+import { colors, spacing, radii, typography } from '../utils/theme';
 
 interface Props {
   visible: boolean;
@@ -333,26 +333,21 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  const getRepeatIcon = () => {
-    switch (repeatMode) {
-      case RepeatMode.Track: return '🔂';
-      case RepeatMode.Queue: return '🔁';
-      default: return '➡️';
-    }
-  };
+  const repeatIsActive = repeatMode !== RepeatMode.Off;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.container}>
-        <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-          <Text style={styles.closeText}>⌄ Cerrar</Text>
+        <TouchableOpacity onPress={onClose} style={styles.closeButton} activeOpacity={0.7}>
+          <Feather name="chevron-down" size={16} color={colors.textSecondary} />
+          <Text style={styles.closeText}>Cerrar</Text>
         </TouchableOpacity>
 
         {/* --- ÁREA CENTRAL: CARÁTULA O LETRAS --- */}
         <View style={styles.artworkPlaceholder}>
           {showLyrics ? (
             loadingLyrics ? (
-              <ActivityIndicator size="large" color="#0088cc" />
+              <ActivityIndicator size="large" color={colors.accent} />
             ) : (
               <LyricsViewer
                 lyrics={lyrics}
@@ -367,11 +362,13 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
               resizeMode="cover"
             />
           ) : (
-            <Text style={{ fontSize: 60 }}>🎵</Text>
+            <View style={styles.artworkFallback}>
+              <Feather name="music" size={48} color={colors.textTertiary} />
+            </View>
           )}
         </View>
 
-        <Text style={styles.title} numberOfLines={2}>
+        <Text style={[typography.title, styles.trackTitle]} numberOfLines={2}>
           {activeTrack?.title ?? 'Sin reproducción'}
         </Text>
         <Text style={styles.artist}>{activeTrack?.artist ?? ''}</Text>
@@ -381,18 +378,25 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
           <TouchableOpacity
             style={[styles.lyricsButton, showLyrics && styles.activeLyricsButton]}
             onPress={handleToggleLyrics}
+            activeOpacity={0.8}
           >
-            <Text style={styles.lyricsButtonText}>
-              {showLyrics ? '🖼️ Carátula' : '🎤 Cargar Letras'}
-            </Text>
+            <Feather
+              name={showLyrics ? 'image' : 'mic'}
+              size={13}
+              color={colors.textPrimary}
+              style={styles.lyricsButtonIcon}
+            />
+            <Text style={styles.lyricsButtonText}>{showLyrics ? 'Carátula' : 'Cargar letras'}</Text>
           </TouchableOpacity>
 
           {showLyrics && lyrics.length > 0 && (
             <TouchableOpacity
               style={[styles.lyricsButton, showTranslation && styles.activeLyricsButton]}
               onPress={() => setShowTranslation(!showTranslation)}
+              activeOpacity={0.8}
             >
-              <Text style={styles.lyricsButtonText}>🌐 Traducir</Text>
+              <Feather name="globe" size={13} color={colors.textPrimary} style={styles.lyricsButtonIcon} />
+              <Text style={styles.lyricsButtonText}>Traducir</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -415,26 +419,26 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
         </View>
 
         <View style={styles.controls}>
-          <TouchableOpacity onPress={() => TrackPlayer.skipToPrevious()}>
-            <Text style={styles.controlIcon}>⏮</Text>
+
+          <TouchableOpacity onPress={toggleRepeatMode} hitSlop={styles.hitSlop} style={styles.secondaryControl}>
+            <Feather name="repeat" size={18} color={repeatIsActive ? colors.accent : colors.textTertiary} />
+            {repeatMode === RepeatMode.Track && <View style={styles.repeatOneDot} />}
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={togglePlayback} style={styles.playButton}>
-            <Text style={styles.controlIcon}>{isPlaying ? '⏸' : '▶️'}</Text>
+          <TouchableOpacity onPress={() => TrackPlayer.skipToPrevious()} hitSlop={styles.hitSlop}>
+            <Feather name="skip-back" size={24} color={colors.textPrimary} />
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => TrackPlayer.skipToNext()}>
-            <Text style={styles.controlIcon}>⏭</Text>
+          <TouchableOpacity onPress={togglePlayback} style={styles.playButton} activeOpacity={0.85}>
+            <Feather name={isPlaying ? 'pause' : 'play'} size={40} color={colors.accent} />
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={toggleRepeatMode}>
-            <Text style={[styles.secondaryIcon, repeatMode !== RepeatMode.Off && styles.activeIcon]}>
-              {getRepeatIcon()}
-            </Text>
+          <TouchableOpacity onPress={() => TrackPlayer.skipToNext()} hitSlop={styles.hitSlop}>
+            <Feather name="skip-forward" size={24} color={colors.textPrimary} />
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={toggleShuffle}>
-            <Text style={[styles.secondaryIcon, isShuffle && styles.activeIcon]}>🔀</Text>
+          <TouchableOpacity onPress={toggleShuffle} hitSlop={styles.hitSlop} style={styles.secondaryControl}>
+            <Feather name="shuffle" size={18} color={isShuffle ? colors.accent : colors.textTertiary} />
           </TouchableOpacity>
         </View>
       </View>
@@ -443,43 +447,69 @@ export default function NowPlayingScreen({ visible, onClose }: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#121212', padding: 24, paddingTop: 60, alignItems: 'center' },
-  closeButton: { alignSelf: 'flex-start', marginBottom: 20 },
-  closeText: { color: '#aaa', fontSize: 14 },
+  container: {
+    flex: 1,
+    backgroundColor: colors.background,
+    padding: spacing.xl,
+    paddingTop: 60,
+    alignItems: 'center',
+  },
+  closeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginBottom: spacing.xl,
+    gap: spacing.xs,
+  },
+  closeText: { color: colors.textSecondary, fontSize: 14, fontWeight: '600' },
   artworkPlaceholder: {
     width: 260,
     height: 260,
-    borderRadius: 12,
-    backgroundColor: '#1e1e1e',
+    borderRadius: radii.lg,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: spacing.xl,
     overflow: 'hidden', // Asegura que las letras no sobresalgan del marco
+  },
+  artworkFallback: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   artworkImage: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: radii.lg,
   },
-  title: { color: '#fff', fontSize: 20, fontWeight: 'bold', textAlign: 'center' },
-  artist: { color: '#aaa', fontSize: 14, marginTop: 4 },
+  trackTitle: { textAlign: 'center' },
+  artist: { color: colors.textSecondary, fontSize: 14, marginTop: spacing.xs },
   lyricsActionRow: {
     flexDirection: 'row',
-    gap: 10,
-    marginTop: 12,
-    marginBottom: 4,
+    gap: spacing.sm,
+    marginTop: spacing.lg,
+    marginBottom: spacing.xs,
   },
   lyricsButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 16,
-    backgroundColor: '#262626',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   activeLyricsButton: {
-    backgroundColor: '#0088cc',
+    backgroundColor: colors.textPrimary,
+    borderColor: colors.accent,
   },
+  lyricsButtonIcon: { marginRight: spacing.xs, color: colors.accent },
   lyricsButtonText: {
-    color: '#fff',
+    color: colors.accent,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -487,33 +517,48 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 40,
     justifyContent: 'center',
-    marginTop: 10,
+    marginTop: spacing.md,
   },
   trackBackground: {
     width: '100%',
-    height: 6,
-    backgroundColor: '#333',
-    borderRadius: 3,
+    height: 4,
+    backgroundColor: colors.surfaceElevated,
+    borderRadius: radii.pill,
     justifyContent: 'center',
   },
   trackFill: {
     height: '100%',
-    backgroundColor: '#0088cc',
-    borderRadius: 3,
+    backgroundColor: colors.accent,
+    borderRadius: radii.pill,
   },
   thumb: {
     position: 'absolute',
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#0088cc',
-    marginLeft: -10,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.accent,
+    marginLeft: -8,
   },
-  timeRow: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
-  timeText: { color: '#aaa', fontSize: 12 },
-  controls: { flexDirection: 'row', alignItems: 'center', marginTop: 25, gap: 30 },
-  controlIcon: { fontSize: 32, color: '#fff' },
-  activeIcon: { opacity: 1 },
-  secondaryIcon: { fontSize: 22, opacity: 0.3 },
-  playButton: { marginHorizontal: 20 },
+  timeRow: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.xs },
+  timeText: { color: colors.textTertiary, fontSize: 12 },
+  controls: { flexDirection: 'row', alignItems: 'center', marginTop: spacing.xl, gap: spacing.xl },
+  secondaryControl: { alignItems: 'center', justifyContent: 'center', marginHorizontal: spacing.xl},
+  repeatOneDot: {
+    position: 'absolute',
+    top: -3,
+    right: -6,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.accent,
+  },
+  playButton: {
+    width: 64,
+    height: 64,
+    borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: spacing.lg,
+  },
+  hitSlop: { top: 10, bottom: 10, left: 10, right: 10 },
 });

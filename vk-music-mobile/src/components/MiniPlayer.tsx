@@ -6,6 +6,8 @@ import TrackPlayer, {
   useProgress,
   State,
 } from 'react-native-track-player';
+import { colors, spacing, radii } from '../utils/theme';
+import { Feather } from '@expo/vector-icons';
 
 interface Props {
   onPress: () => void;
@@ -61,12 +63,16 @@ export default function MiniPlayer({ onPress }: Props) {
           </Text>
         </View>
 
-        <TouchableOpacity style={styles.button} onPress={togglePlayback}>
-          <Text style={styles.buttonIcon}>{isPlaying ? '⏸' : '▶️'}</Text>
+        <TouchableOpacity onPress={() => TrackPlayer.skipToPrevious()} hitSlop={styles.hitSlop}>
+          <Feather name="skip-back" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.button} onPress={handleSkipNext}>
-          <Text style={styles.buttonIcon}>⏭</Text>
+        <TouchableOpacity onPress={togglePlayback} style={styles.playButton} activeOpacity={0.85}>
+          <Feather name={isPlaying ? 'pause' : 'play'} size={22} color={colors.textPrimary} />
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={() => TrackPlayer.skipToNext()} hitSlop={styles.hitSlop}>
+          <Feather name="skip-forward" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
       </View>
     </TouchableOpacity>
@@ -95,7 +101,7 @@ const styles = StyleSheet.create({
   },
   progressBarFill: {
     height: '100%',
-    backgroundColor: '#0088cc',
+    backgroundColor: colors.accent,
   },
   content: {
     flexDirection: 'row',
@@ -103,8 +109,18 @@ const styles = StyleSheet.create({
     padding: 12,
   },
   infoContainer: { flex: 1, marginRight: 10 },
-  title: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  title: { color: colors.textPrimary, fontSize: 14, fontWeight: 'bold', fontStyle: },
   artist: { color: '#aaa', fontSize: 12, marginTop: 2 },
   button: { paddingHorizontal: 10 },
   buttonIcon: { fontSize: 22, color: '#fff' },
+  playButton: {
+    width: 56,
+    height: 56,
+    borderRadius: radii.pill,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: spacing.lg,
+  },
+  hitSlop: { top: 10, bottom: 10, left: 10, right: 10 },
 });

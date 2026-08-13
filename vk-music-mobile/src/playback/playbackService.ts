@@ -52,6 +52,22 @@ export const PlaybackService = async function () {
     }
   });
 
+  TrackPlayer.addEventListener(Event.RemoteDuck, async (event) => {
+    const { paused, permanent } = event;
+
+    if (permanent) {
+      // Interrupción permanente (ej. otra app tomó el audio por completo)
+      await TrackPlayer.pause();
+    } else if (paused) {
+      // Se desconectaron los auriculares o entró una llamada/notificación
+      await TrackPlayer.pause();
+    } else {
+      // La interrupción terminó (ej. colgaste la llamada). 
+      // Opcional: Reanudar la música automáticamente
+      await TrackPlayer.play();
+    }
+  });
+
   TrackPlayer.addEventListener(Event.PlaybackError, (error) => {
     console.warn('[TrackPlayer] Error de reproducción:', error);
   });
