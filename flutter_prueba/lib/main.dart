@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'todo-page.dart';
+import 'notifications/notifications_service.dart';
+import 'todo_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -9,6 +10,9 @@ void main() async {
     url: 'https://yyxajlxynzrksurqrbtk.supabase.co',
     publishableKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl5eGFqbHh5bnpya3N1cnFyYnRrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwMTU5MjgsImV4cCI6MjEwMTU5MTkyOH0.cYshJlVpuZaM_1_GUo2C8dyrwkeLjUtdn8FzDtBv8E8',
   );
+
+  // Inicializar notificaciones
+  await NotificationService().init();
 
   runApp(const MyApp());
 }

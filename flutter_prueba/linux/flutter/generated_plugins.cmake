@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   gtk
+  local_notifier
   url_launcher_linux
 )
 
