@@ -49,6 +49,10 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
     <!-- En android/app/src/main/AndroidManifest.xml -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'todo.dart';
 import 'todo_service.dart';
 import 'notifications/notifications_service.dart';
@@ -186,52 +187,115 @@ class _TodoPageState extends State<TodoPage> {
                       ],
                     ),
                     const SizedBox(height: 20),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 48,
-                      child: FilledButton.icon(
-                        icon: const Icon(Icons.save),
-                        label: const Text('Guardar Tarea'),
-                        onPressed: () async {
-                          final titulo = titleController.text.trim();
-                          if (titulo.isEmpty) return;
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            icon: const Icon(Icons.calendar_month, color: Colors.blue),
+                            label: const Text('Exportar a Calendar'),
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(48),
+                            ),
+                            onPressed: () async {
+                              final titulo = titleController.text.trim();
+                              if (titulo.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Ingresa al menos el título para exportar a Calendar'),
+                                  ),
+                                );
+                                return;
+                              }
 
-                          try {
-                            final nuevaTarea = Tareas(
-                              titulo: titulo,
-                              descripcion: descriptionController.text.trim().isEmpty
-                                  ? null
-                                  : descriptionController.text.trim(),
-                              prioridad: priority,
-                              fechaLimite: selectedFechaLimite,
-                              notifyAt: selectedNotifyAt,
-                            );
+                              final descripcion = descriptionController.text.trim();
+                              final startDate = selectedNotifyAt ?? selectedFechaLimite ?? DateTime.now();
+                              final endDate = startDate.add(const Duration(hours: 1));
 
-                            final tareaCreada = await _todoService.addTodo(nuevaTarea);
+                              String formatGCalDate(DateTime dt) {
+                                final utc = dt.toUtc();
+                                String twoDigits(int n) => n.toString().padLeft(2, '0');
+                                return '${utc.year}${twoDigits(utc.month)}${twoDigits(utc.day)}T'
+                                    '${twoDigits(utc.hour)}${twoDigits(utc.minute)}${twoDigits(utc.second)}Z';
+                              }
 
-                            // Programar recordatorio si se seleccionó fecha
-                            if (tareaCreada.notifyAt != null && tareaCreada.id != null) {
-                              await _notificationService.scheduleNotification(
-                                id: tareaCreada.id.hashCode,
-                                title: '⏰ Recordatorio de tarea',
-                                body: tareaCreada.titulo,
-                                scheduledDate: tareaCreada.notifyAt!,
-                              );
-                            }
+                              final datesParam = '${formatGCalDate(startDate)}/${formatGCalDate(endDate)}';
+                              final uri = Uri.https('calendar.google.com', '/calendar/render', {
+                                'action': 'TEMPLATE',
+                                'text': titulo,
+                                if (descripcion.isNotEmpty) 'details': descripcion,
+                                'dates': datesParam,
+                              });
 
-                            if (mounted) {
-                              Navigator.pop(ctx);
-                              _refreshTodos();
-                            }
-                          } catch (e) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Error al guardar: $e')),
-                              );
-                            }
-                          }
-                        },
-                      ),
+                              try {
+                                if (await canLaunchUrl(uri)) {
+                                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                } else {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('No se pudo abrir Google Calendar')),
+                                    );
+                                  }
+                                }
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('Error al abrir Calendar: $e')),
+                                  );
+                                }
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: FilledButton.icon(
+                            icon: const Icon(Icons.save),
+                            label: const Text('Guardar Tarea'),
+                            style: FilledButton.styleFrom(
+                              minimumSize: const Size.fromHeight(48),
+                            ),
+                            onPressed: () async {
+                              final titulo = titleController.text.trim();
+                              if (titulo.isEmpty) return;
+
+                              try {
+                                final nuevaTarea = Tareas(
+                                  titulo: titulo,
+                                  descripcion: descriptionController.text.trim().isEmpty
+                                      ? null
+                                      : descriptionController.text.trim(),
+                                  prioridad: priority,
+                                  fechaLimite: selectedFechaLimite,
+                                  notifyAt: selectedNotifyAt,
+                                );
+
+                                final tareaCreada = await _todoService.addTodo(nuevaTarea);
+
+                                // Programar recordatorio si se seleccionó fecha
+                                if (tareaCreada.notifyAt != null && tareaCreada.id != null) {
+                                  await _notificationService.scheduleNotification(
+                                    id: tareaCreada.id.hashCode,
+                                    title: '⏰ Recordatorio de tarea',
+                                    body: tareaCreada.titulo,
+                                    scheduledDate: tareaCreada.notifyAt!,
+                                  );
+                                }
+
+                                if (mounted) {
+                                  Navigator.pop(ctx);
+                                  _refreshTodos();
+                                }
+                              } catch (e) {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('Error al guardar: $e')),
+                                  );
+                                }
+                              }
+                            },
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
